@@ -1,0 +1,59 @@
+# CLAUDE.md — livestream-encoder
+
+Guidance for AI tools (and humans) working in this repo. A Node 24 / TypeScript service supervises one ffmpeg
+process per channel, turning file, pull (RTSP/RTMP/HLS/HTTP), RTMP-push and SRT-push input into adaptive-bitrate
+HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs natively on macOS (no Docker).
+
+## Commands
+
+- `npm run nginx` — nginx in the foreground with the repo-local config (`nginx/nginx.conf`, prefix = repo root).
+- `npm run dev` — API on :3000 with `--watch`. `npm start` without watch.
+- `npm test` — `node --test` over `src/**/*.test.ts`. `npm run typecheck` — `tsc --noEmit`.
+- `npm run sample` — writes `media/sample.mp4` (1080p30 test pattern + tone). `npm run push:rtmp` / `npm run push:srt` —
+  push a live test pattern like OBS would.
+
+## Conventions
+
+- Strict TypeScript. `any` is forbidden; use `unknown` and narrow.
+- `async/await`, no `.then()` chains.
+- No silent failures: an ffmpeg/ffprobe failure ends up in the channel's `state`/`lastError` (visible via
+  `GET /channels/:id`) **and** in the logs. Domain errors throw `AppError` (src/errors.ts) with an HTTP status.
+- Runtime is Node 24 type stripping — no tsx, no build. Use only erasable TS syntax (no enums, namespaces or
+  parameter properties), relative imports with explicit `.ts` extensions, and `import type` for type-only imports.
+- Tests live next to the code as `*.test.ts`. Prefer dependency injection over mocking globals: `Supervisor` takes a
+  `spawn`, `ChannelManager` takes `spawn`, `probe` and `killStale`. Shared fakes are in `src/testing/fakes.ts`.
+  Supervisor tests drive time with `mock.timers`; manager tests use real timers and `waitFor`.
+
+## ffmpeg
+
+- Every ffmpeg argument comes from the pure `buildArgs` (src/ffmpeg/buildArgs.ts), which is covered by tests. Never
+  build shell strings — spawn with argument arrays.
+- ffmpeg/ffprobe paths come from config (`FFMPEG_PATH`/`FFPROBE_PATH`). The default is Homebrew's `ffmpeg-full`,
+  which is keg-only (`/opt/homebrew/opt/ffmpeg-full/bin`). The plain `ffmpeg` formula has no SRT support.
+- Verify ffmpeg behaviour empirically (run it) before relying on flag documentation; several assumptions here were
+  wrong until tested. Known facts:
+  - The RTMP listener (`-listen 1`) only *warns* on a wrong stream key and accepts the publish, so the
+    supervisor kills on that stderr line (`rejectWrongStreamKey`).
+  - A listener exits 0 when the publisher disconnects; the supervisor re-arms it.
+  - `-hls_fmp4_init_filename init.mp4` produces `init_<n>.mp4` per variant.
+
+## HLS invariants
+
+- Keyframes stay aligned to `hls_time` across all variants (`-force_key_frames` + fixed GOP + `-sc_threshold 0`).
+  ABR switching depends on it.
+- Live playlists use `append_list` so media sequence numbers continue across restarts, and `omit_endlist` so players
+  keep polling while a publisher reconnects. Do **not** add `discont_start` (duplicates the discontinuity tag) or
+  `-hls_start_number_source epoch` (with append_list it renumbers already-published segments).
+- `prepareOutputDir` sweeps orphaned segments before each live run; VOD output is wiped and rebuilt.
+- nginx must keep the CORS headers and preflight handling (`nginx/cors.conf`, included in every HLS location) and
+  `Cache-Control: no-cache` on `.m3u8`. These are what let the hls.js demo page play from localhost.
+
+## Paths
+
+- `var/` (gitignored): `hls/` output, `channels.json` (persisted channels), `pids/` (ffmpeg pid files, used to kill
+  orphans after a crash), `nginx/` logs and temp dirs. `media/` (gitignored) holds input files.
+
+## Git
+
+- Never push code changes.
+- Never commit without a message describing what was done.

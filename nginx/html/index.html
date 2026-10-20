@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Encoder Test Player</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --card: #fff; --line: #deded9; --ok: #1f7a3d; --warn: #9a6400; --bad: #b3261e; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ececea; --muted: #9a9a94; --card: #1f1f1e; --line: #333331; --ok: #5cc27e; --warn: #e0a942; --bad: #f2867e; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; }
+    main { max-width: 1100px; margin: 0 auto; display: grid; gap: 20px; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+    @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p { margin: 0; color: var(--muted); }
+    video { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+    .meta code { color: var(--fg); }
+    ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    button.channel { width: 100%; text-align: left; font: inherit; color: inherit; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+    button.channel[aria-pressed="true"] { border-color: var(--fg); }
+    .row { display: flex; justify-content: space-between; gap: 8px; }
+    .state { font-size: 12px; font-weight: 600; }
+    .state.running, .state.completed { color: var(--ok); }
+    .state.waiting_for_publisher, .state.starting, .state.restarting { color: var(--warn); }
+    .state.error { color: var(--bad); }
+    .small { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+    select { font: inherit; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Encoder test player</h1>
+      <p>Plays a channel's master playlist with hls.js. Pick a channel on the right.</p>
+      <div class="card" style="margin-top:14px">
+        <video id="video" controls muted playsinline></video>
+        <div class="meta">
+          <span>Level: <select id="level"><option value="-1">Auto</option></select></span>
+          <span>Playing: <code id="current">–</code></span>
+          <span>Latency: <code id="latency">–</code></span>
+        </div>
+        <p class="small" id="url" style="margin-top:8px"></p>
+      </div>
+    </section>
+    <aside>
+      <h1>Channels</h1>
+      <p class="small" id="api-status">Loading…</p>
+      <ul id="channels" style="margin-top:10px"></ul>
+    </aside>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
+  <script>
+    const video = document.getElementById('video');
+    const levelSelect = document.getElementById('level');
+    let hls = null;
+    let selected = null;
+
+    function play(channel) {
+      selected = channel.id;
+      document.getElementById('url').textContent = channel.playbackUrl;
+      if (hls) hls.destroy();
+      levelSelect.length = 1;
+      if (window.Hls && Hls.isSupported()) {
+        hls = new Hls({ lowLatencyMode: false });
+        hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
+          data.levels.forEach((level, i) => levelSelect.add(new Option(`${level.height}p · ${Math.round(level.bitrate / 1000)} kbps`, i)));
+          video.play().catch(() => {});
+        });
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
+          const level = hls.levels[data.level];
+          document.getElementById('current').textContent = level ? `${level.height}p` : '–';
+        });
+        hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) console.warn('hls.js fatal error', data); });
+        hls.loadSource(channel.playbackUrl);
+        hls.attachMedia(video);
+      } else {
+        video.src = channel.playbackUrl; // Safari plays HLS natively
+      }
+      render(lastChannels);
+    }
+
+    levelSelect.addEventListener('change', () => { if (hls) hls.currentLevel = Number(levelSelect.value); });
+    setInterval(() => {
+      document.getElementById('latency').textContent = hls && hls.latency ? `${hls.latency.toFixed(1)}s` : '–';
+    }, 1000);
+
+    let lastChannels = [];
+    function render(channels) {
+      const list = document.getElementById('channels');
+      list.replaceChildren(...channels.map((c) => {
+        const li = document.createElement('li');
+        const button = document.createElement('button');
+        button.className = 'channel';
+        button.setAttribute('aria-pressed', String(c.id === selected));
+        const fps = c.progress && c.progress.fps ? ` · ${c.progress.fps.toFixed(0)} fps · ${c.progress.speed ?? '?'}x` : '';
+        button.innerHTML = `<div class="row"><strong></strong><span class="state ${c.state}">${c.state.replaceAll('_', ' ')}</span></div>
+          <div class="small">${c.spec.input.type} · ${c.spec.mode}${fps}</div>
+          <div class="small ingest"></div><div class="small err"></div>`;
+        button.querySelector('strong').textContent = c.id;
+        button.querySelector('.ingest').textContent = c.ingestUrl ? `ingest: ${c.ingestUrl}` : '';
+        button.querySelector('.err').textContent = c.lastError && c.state !== 'running' ? `last error: ${c.lastError}` : '';
+        button.addEventListener('click', () => play(c));
+        li.append(button);
+        return li;
+      }));
+    }
+
+    async function refresh() {
+      try {
+        const res = await fetch('/api/channels');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        lastChannels = await res.json();
+        document.getElementById('api-status').textContent = lastChannels.length ? '' : 'No channels yet. Create one with POST /channels.';
+        render(lastChannels);
+      } catch (err) {
+        document.getElementById('api-status').textContent = `Encoder API unreachable (${err.message}). Is npm run dev running?`;
+      }
+    }
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

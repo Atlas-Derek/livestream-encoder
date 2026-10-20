@@ -1,0 +1,5 @@
+node_modules/
+var/
+media/
+*.log
+.DS_Store
