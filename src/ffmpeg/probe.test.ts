@@ -38,10 +38,6 @@ describe('parseProbeOutput', () => {
     assert.equal(upsideDown.width, 1920);
   });
 
-  it('reports no duration for a live source', () => {
-    assert.equal(parseProbeOutput({ streams: [], format: { format_name: 'hls' } }).durationSec, null);
-  });
-
   it('tolerates missing streams', () => {
     assert.deepEqual(parseProbeOutput({}), { width: null, height: null, fps: null, videoCodec: null, audioCodec: null, durationSec: null });
   });

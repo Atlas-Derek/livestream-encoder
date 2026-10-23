@@ -23,11 +23,6 @@ const ANNEXB_DUMP = [
 ].join('\n');
 
 describe('codec strings', () => {
-  it('reads ffprobe hexdumps', () => {
-    assert.deepEqual([...parseHexdump(HVCC_DUMP).subarray(0, 4)], [0x01, 0x01, 0x60, 0x00]);
-    assert.equal(parseHexdump(ANNEXB_DUMP).length, 64);
-  });
-
   it('builds the HEVC string from hvcC and from an Annex B SPS alike', () => {
     assert.equal(hevcCodecString(parseHexdump(HVCC_DUMP), 'hvc1'), 'hvc1.1.6.L120.90');
     assert.equal(hevcCodecString(parseHexdump(ANNEXB_DUMP), 'hev1'), 'hev1.1.6.L120.90');

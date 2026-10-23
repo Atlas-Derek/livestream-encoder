@@ -86,10 +86,11 @@ describe('inputArgs', () => {
     ]);
   });
 
-  it('listens for SRT with an encoded passphrase', () => {
+  it('listens for SRT, with an encoded passphrase when one is set', () => {
     assert.deepEqual(inputArgs({ type: 'srt', passphrase: 'pass word&123', audio: true }, 'live', 9001), [
       '-i', 'srt://0.0.0.0:9001?mode=listener&passphrase=pass%20word%26123&pbkeylen=16',
     ]);
+    assert.deepEqual(inputArgs({ type: 'srt', audio: true }, 'live', 9000), ['-i', 'srt://0.0.0.0:9000?mode=listener']);
   });
 
   it('refuses a listener without a port', () => {
@@ -146,14 +147,6 @@ describe('buildArgs', () => {
     assert.equal(args.at(-1), '/hls/ch/%v/ffmpeg.m3u8');
   });
 
-  it('drops rungs above a 720p source', () => {
-    const { variants, args } = buildArgs(spec({ type: 'pull', url: 'https://x/live.m3u8' }), {
-      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, height: 720 }, encoder: ENCODER,
-    });
-    assert.deepEqual(variants, ['720p', '360p']);
-    assert.equal(valueOf(args, '-var_stream_map'), 'v:0,a:0,name:720p v:1,a:1,name:360p');
-  });
-
   it('encodes the full ladder for push inputs and sizes the GOP for up to 60 fps', () => {
     const { variants, args } = buildArgs(spec({ type: 'rtmp', streamKey: 'abc' }), {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 1935, probe: null, encoder: ENCODER,
@@ -162,13 +155,6 @@ describe('buildArgs', () => {
     assert.equal(valueOf(args, '-g:v:0'), '240');
     assert.equal(args.some((arg) => arg.startsWith('-keyint_min')), false);
     assert.equal(valueOf(args, '-force_key_frames'), 'expr:gte(t,n_forced*4)');
-  });
-
-  it('builds the SRT listener with the full ladder', () => {
-    const { args } = buildArgs(spec({ type: 'srt' }), {
-      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
-    });
-    assert.equal(valueOf(args, '-i'), 'srt://0.0.0.0:9000?mode=listener');
   });
 
   it('scales portrait sources by width and picks rungs by the short side', () => {

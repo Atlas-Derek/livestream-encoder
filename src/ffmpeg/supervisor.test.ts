@@ -108,16 +108,18 @@ describe('Supervisor', () => {
     assert.equal(spawner.children.length, 4);
   });
 
-  it('completes a VOD run and does not restart it', async () => {
-    const { supervisor, spawner } = makeSupervisor({ restart: 'never' });
-    supervisor.start();
-    await flush();
-    spawner.last().progress(4);
-    await flush();
-    spawner.last().exit(0);
-    await tick(60_000);
-    assert.equal(supervisor.state, 'completed');
-    assert.equal(spawner.children.length, 1);
+  it('completes on a clean exit, without restarting, for VOD and non-looping live files', async () => {
+    for (const restart of ['never', 'on-failure'] as const) {
+      const { supervisor, spawner } = makeSupervisor({ restart });
+      supervisor.start();
+      await flush();
+      spawner.last().progress(4);
+      await tick(5_000);
+      spawner.last().exit(0);
+      await tick(60_000);
+      assert.equal(supervisor.state, 'completed', restart);
+      assert.equal(spawner.children.length, 1, restart);
+    }
   });
 
   it('reports a failed VOD run as an error with the last ffmpeg line', async () => {
@@ -131,17 +133,6 @@ describe('Supervisor', () => {
     assert.equal(supervisor.state, 'error');
     assert.match(supervisor.status().lastError ?? '', /code 254: media\/missing\.mp4: No such file/);
     assert.equal(spawner.children.length, 1);
-  });
-
-  it('treats the end of a non-looping live file as completion', async () => {
-    const { supervisor, spawner } = makeSupervisor({ restart: 'on-failure' });
-    supervisor.start();
-    await flush();
-    spawner.last().progress(4);
-    await tick(5_000);
-    spawner.last().exit(0);
-    await tick(60_000);
-    assert.equal(supervisor.state, 'completed');
   });
 
   it('kills a stalled ffmpeg, escalating to SIGKILL, then restarts it', async () => {

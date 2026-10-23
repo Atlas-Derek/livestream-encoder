@@ -83,7 +83,6 @@ describe('ChannelManager', () => {
     await assert.rejects(manager.create(spec({ id: 'd', input: { type: 'rtmp', streamKey: 'kd' } })), {
       message: 'no free rtmp ports in 1935-1936',
     });
-    await manager.shutdown();
   });
 
   it('frees a port when its channel is removed', async () => {
@@ -94,7 +93,6 @@ describe('ChannelManager', () => {
     await manager.remove('a');
     const c = await manager.create(spec({ id: 'c', input: { type: 'rtmp', streamKey: 'kc' } }));
     assert.equal(c.port, 1935);
-    await manager.shutdown();
   });
 
   it('rejects duplicate ids and unknown channels', async () => {
@@ -103,7 +101,6 @@ describe('ChannelManager', () => {
     await manager.create(spec({ id: 'a', input: { type: 'srt' } }));
     await assert.rejects(manager.create(spec({ id: 'a', input: { type: 'srt' } })), (err) => err instanceof AppError && err.status === 409);
     assert.throws(() => manager.get('nope'), (err) => err instanceof AppError && err.status === 404);
-    await manager.shutdown();
   });
 
   it('probes file input, drops rungs above the source, and spawns ffmpeg', async () => {
@@ -118,7 +115,6 @@ describe('ChannelManager', () => {
     assert.equal(args[args.indexOf('-var_stream_map') + 1], 'v:0,a:0,name:720p v:1,a:1,name:360p');
     await access(path.join(config.hlsRoot, 'vod', '720p'));
     assert.equal(manager.get('vod').state, 'starting');
-    await manager.shutdown();
   });
 
   it('keeps SRT passphrases and URL credentials out of logs and status', async () => {
@@ -138,7 +134,6 @@ describe('ChannelManager', () => {
     assert.equal(text.includes('correct-horse-battery'), false);
     assert.equal(text.includes('hunter2'), false);
     assert.deepEqual(manager.get('cam').spec.input, { type: 'pull', url: 'rtsp://admin:********@cam.local/stream' });
-    await manager.shutdown();
   });
 
   it('publishes a live channel’s playlists while ffmpeg runs, and stops before its output is deleted', async () => {
@@ -159,6 +154,7 @@ describe('ChannelManager', () => {
     await manager.remove('live');
     await new Promise<void>((resolve) => setTimeout(resolve, 400)); // longer than a publish interval
     assert.equal(existsSync(outDir), false, 'no publisher write recreates the deleted output');
+    assert.deepEqual(manager.list(), []);
   });
 
   it('puts a channel with a missing input file into error without spawning', async () => {
@@ -204,18 +200,6 @@ describe('ChannelManager', () => {
       [['live', 'waiting_for_publisher', 1935], ['idle', 'idle', 9000], ['vod', 'idle', null]],
     );
     assert.ok(second.manager.get('vod').completedAt);
-    await second.manager.shutdown();
-  });
-
-  it('deletes the output directory when a channel is removed', async () => {
-    const { manager } = makeManager();
-    await manager.init();
-    await manager.create(spec({ id: 'gone', input: { type: 'srt' } }));
-    await waitFor(() => manager.get('gone').state === 'waiting_for_publisher');
-    await access(path.join(config.hlsRoot, 'gone'));
-    await manager.remove('gone');
-    await assert.rejects(access(path.join(config.hlsRoot, 'gone')));
-    assert.deepEqual(manager.list(), []);
   });
 
   it('refuses to start from a corrupt channels.json instead of silently dropping channels', async () => {
