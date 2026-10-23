@@ -2,7 +2,16 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { ChannelSpecSchema, type Rung } from '../channels/schema.ts';
 import { AppError } from '../errors.ts';
-import { buildArgs, colorPlan, inputArgs, redactSecrets, rungFps, selectRungs, type EncoderConfig } from './buildArgs.ts';
+import {
+  buildArgs,
+  colorPlan,
+  inputArgs,
+  redactSecrets,
+  rungFps,
+  rungVideoKbps,
+  selectRungs,
+  type EncoderConfig,
+} from './buildArgs.ts';
 import type { ProbeResult } from './probe.ts';
 
 const LADDER: Rung[] = [
@@ -242,6 +251,18 @@ describe('buildArgs', () => {
     assert.equal(valueOf(args, '-g:v:0'), '240'); // 60 fps x 4s
     assert.equal(valueOf(args, '-g:v:1'), '120'); // 30 fps x 4s
     assert.equal(valueOf(args, '-keyint_min:v:1'), '120');
+    // Only the rung that keeps 60 fps gets the high frame rate bitrate.
+    assert.deepEqual([valueOf(args, '-b:v:0'), valueOf(args, '-maxrate:v:0'), valueOf(args, '-b:v:1')], ['7500k', '8025k', '800k']);
+  });
+
+  it('raises the bitrate only for rungs that keep a probed source above 30 fps', () => {
+    const rung = LADDER[0] as Rung; // 5000k
+    assert.equal(rungVideoKbps(rung, 60), 7500);
+    assert.equal(rungVideoKbps(rung, 50), 7500);
+    assert.equal(rungVideoKbps(rung, 30), 5000);
+    assert.equal(rungVideoKbps(rung, 29.97), 5000);
+    assert.equal(rungVideoKbps({ ...rung, maxFps: 30 }, 60), 5000, 'capped to 30');
+    assert.equal(rungVideoKbps(rung, null), 5000, 'push source: unknown');
   });
 
   it('deinterlaces before scaling and keeps audio in sync, but not in passthrough', () => {

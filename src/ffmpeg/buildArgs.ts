@@ -167,6 +167,18 @@ const HTTP_RECONNECT = [
   '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_on_network_error', '1', '-reconnect_delay_max', '5',
 ];
 
+/**
+ * A rung that keeps a source above 30 fps gets this much more bitrate: twice the frames, but each one differs less from
+ * the last. Applies to probed sources; a push source's frame rate isn't known when ffmpeg starts, so it gets the base.
+ */
+const HIGH_FPS_BITRATE_FACTOR = 1.5;
+
+/** A rung's video bitrate for a source at sourceFps (null when unknown). */
+export function rungVideoKbps(rung: Rung, sourceFps: number | null): number {
+  const fps = sourceFps === null ? null : rungFps(sourceFps, rung.maxFps);
+  return fps !== null && fps > 30 ? Math.round(rung.videoBitrateKbps * HIGH_FPS_BITRATE_FACTOR) : rung.videoBitrateKbps;
+}
+
 function requirePort(port: number | null, input: Input): number {
   if (port === null) throw new AppError(`${input.type} input has no listener port assigned`, 500);
   return port;
@@ -275,7 +287,7 @@ function ladderArgs(
   });
   args.push(...videoEncoderArgs(encoder), ...color.output, ...gopArgs(rungs, probe?.fps ?? null, encoder));
   rungs.forEach((rung, i) => {
-    const kbps = rung.videoBitrateKbps;
+    const kbps = rungVideoKbps(rung, probe?.fps ?? null);
     args.push(
       `-b:v:${i}`, `${kbps}k`,
       `-maxrate:v:${i}`, `${Math.round(kbps * 1.07)}k`,

@@ -5,7 +5,7 @@ ffmpeg. nginx serves the output so any HLS player, such as the hls.js demo, can 
 
 - **Inputs:** media files (as VOD, or played out as a live channel, optionally looping), pulled URLs
   (RTSP, RTMP, HLS, HTTP, SRT), RTMP push (OBS, hardware encoders) and SRT push.
-- **Output:** a 1080p/720p/480p/360p H.264/AAC ladder by default ([config/ladder.json](config/ladder.json)). Rungs
+- **Output:** a 1080p/720p/480p/360p/240p H.264/AAC ladder by default ([config/ladder.json](config/ladder.json)). Rungs
   taller than the source are dropped. Segments are MPEG-TS or fMP4. There is also a passthrough mode for sources that
   are already H.264/AAC.
 - One supervised ffmpeg process per channel, which restarts with backoff, kills stalled runs, re-arms listeners when
@@ -133,7 +133,7 @@ makes a single, longer one.
 | `720p30.mp4` | 720p and below; the 1080p rung is dropped |
 | `240p.mp4` | a single 240p rendition |
 | `no-audio.mp4` | no audio codec in the master playlist's `CODECS` |
-| `1080p60.mp4` | 60 fps on 1080p and 720p, 30 fps on 480p and 360p (`maxFps`) |
+| `1080p60.mp4` | 60 fps on 1080p and 720p at 1.5× bitrate, 30 fps on 480p, 360p and 240p (`maxFps`) |
 | `1080i.mp4` | 1080i29.97: progressive output at 29.97 fps, no combing on moving edges |
 | `portrait.mp4` | 1080×1920, 720×1280, … |
 | `phone-rotated.mp4` | stored 1920×1080 with a rotate-90° flag, like most phone video: the same portrait output |
@@ -323,7 +323,7 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
   frames while decoding. The probe applies the flag too, so a phone clip counts as 1080×1920 portrait.
 - **Frame-rate cap.** A rung with `maxFps` divides the source frame rate by the smallest whole number that brings
   it under the cap: 60 → 30, 59.94 → 29.97, 50 → 25, and 29.97 stays as it is. Even cadence means no judder. The
-  default ladder caps 480p and 360p at 30. At those bitrates, 60 fps mostly spends bits on frames nobody sees.
+  default ladder caps 480p, 360p and 240p at 30. At those bitrates, 60 fps mostly spends bits on frames nobody sees.
 - **Audio gaps.** `aresample=async=1` fills gaps in the audio timestamps with silence, so audio can't drift ahead of
   video. Gaps come from packets dropped by OBS or the network, and from every loop point of a looping file. It runs
   once, and `asplit` feeds each rendition. With one `aresample` per rendition (`-af`), ffmpeg 9 froze at the first gap
@@ -348,7 +348,10 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
   - `-sc_threshold 0` turns off x264's extra keyframes on scene cuts. Those would land differently in each rendition.
 
 **4. Bitrate.**
-- `-b:v` is each rung's target.
+- `-b:v` is each rung's target. A rung that keeps a probed source above 30 fps gets 1.5× its `videoBitrateKbps`
+  (1080p60: 7.5 Mbps). Push sources' frame rate isn't known when ffmpeg starts, so they get the base rate.
+  - With the higher rates, 720p60 advertises about 4.6 Mbps, above the 3.5 Mbps start limit, so players start a 60 fps
+    channel on 480p and step up from there.
 - `-maxrate` (1.07× the target) and `-bufsize` (1.5×) cap the peaks.
 - Together they keep the `BANDWIDTH` that the master playlist advertises honest, so players choose renditions they
   can actually sustain.

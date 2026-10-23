@@ -2,5 +2,6 @@
   {"name": "1080p", "height": 1080, "videoBitrateKbps": 5000, "audioBitrateKbps": 128},
   {"name": "720p", "height": 720, "videoBitrateKbps": 2800, "audioBitrateKbps": 128},
   {"name": "480p", "height": 480, "videoBitrateKbps": 1400, "audioBitrateKbps": 96, "maxFps": 30},
-  {"name": "360p", "height": 360, "videoBitrateKbps": 800, "audioBitrateKbps": 96, "maxFps": 30}
+  {"name": "360p", "height": 360, "videoBitrateKbps": 800, "audioBitrateKbps": 96, "maxFps": 30},
+  {"name": "240p", "height": 240, "videoBitrateKbps": 400, "audioBitrateKbps": 64, "maxFps": 30}
 ]
