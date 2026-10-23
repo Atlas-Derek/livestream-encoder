@@ -12,11 +12,23 @@
     main { max-width: 1100px; margin: 0 auto; display: grid; gap: 20px; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
     @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
     h1 { font-size: 20px; margin: 0 0 4px; }
+    h2 { font-size: 15px; margin: 18px 0 6px; }
     p { margin: 0; color: var(--muted); }
     video { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
-    .meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+    .meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 13px; color: var(--muted); align-items: center; }
     .meta code { color: var(--fg); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 12px; }
+    .stat { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+    .stat .label { font-size: 11px; color: var(--muted); }
+    .stat .value { font: 600 15px/1.3 ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+    .stat .value.warn { color: var(--warn); }
+    .stat .value.bad { color: var(--bad); }
+    ol.log { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; font: 12px/1.5 ui-monospace, monospace; }
+    ol.log li { padding: 2px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+    ol.log .time { color: var(--muted); margin-right: 8px; }
+    ol.log .warn { color: var(--warn); }
+    ol.log .bad { color: var(--bad); }
     ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
     button.channel { width: 100%; text-align: left; font: inherit; color: inherit; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
     button.channel[aria-pressed="true"] { border-color: var(--fg); }
@@ -26,23 +38,27 @@
     .state.waiting_for_publisher, .state.starting, .state.restarting { color: var(--warn); }
     .state.error { color: var(--bad); }
     .small { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-    select { font: inherit; }
+    .small a { color: inherit; }
+    select, button.plain { font: inherit; }
   </style>
 </head>
 <body>
   <main>
     <section>
       <h1>Encoder test player</h1>
-      <p>Plays a channel's master playlist with hls.js. Pick a channel on the right.</p>
+      <p>Plays a channel's master playlist with hls.js, or the browser's own HLS player. Pick a channel on the right.</p>
       <div class="card" style="margin-top:14px">
         <video id="video" controls muted playsinline></video>
         <div class="meta">
-          <span>Level: <select id="level"><option value="-1">Auto</option></select></span>
-          <span>Playing: <code id="current">–</code></span>
-          <span>Latency: <code id="latency">–</code></span>
+          <span>Rendition: <select id="level"><option value="-1">Auto</option></select></span>
+          <label><input type="checkbox" id="native"> Native HLS (Safari)</label>
+          <button class="plain" id="clear-log" type="button">Clear log</button>
         </div>
-        <p class="small" id="url" style="margin-top:8px"></p>
+        <div class="stats" id="stats"></div>
+        <p class="small" id="url" style="margin-top:10px"></p>
       </div>
+      <h2>Events</h2>
+      <div class="card"><ol class="log" id="log"><li class="small">Rendition switches, discontinuities, stalls and errors appear here.</li></ol></div>
     </section>
     <aside>
       <h1>Channels</h1>
@@ -55,36 +71,122 @@
   <script>
     const video = document.getElementById('video');
     const levelSelect = document.getElementById('level');
+    const nativeBox = document.getElementById('native');
+    const logList = document.getElementById('log');
+    const canPlayNative = video.canPlayType('application/vnd.apple.mpegurl') !== '';
+    nativeBox.disabled = !canPlayNative;
+    if (!canPlayNative) nativeBox.parentElement.title = 'This browser has no built-in HLS player (Safari has)';
     let hls = null;
     let selected = null;
+    let lastCc = null;
+
+    function log(text, tone = '') {
+      if (logList.firstElementChild && logList.firstElementChild.classList.contains('small')) logList.replaceChildren();
+      const li = document.createElement('li');
+      const time = document.createElement('span');
+      time.className = 'time';
+      time.textContent = new Date().toLocaleTimeString();
+      const body = document.createElement('span');
+      body.className = tone;
+      body.textContent = text;
+      li.append(time, body);
+      logList.prepend(li);
+      while (logList.children.length > 200) logList.lastElementChild.remove();
+    }
+    document.getElementById('clear-log').addEventListener('click', () => logList.replaceChildren());
+
+    function levelName(level) {
+      return level ? `${level.height}p · ${Math.round(level.bitrate / 1000)} kbps` : '–';
+    }
 
     function play(channel) {
-      selected = channel.id;
-      document.getElementById('url').textContent = channel.playbackUrl;
+      selected = channel;
+      document.getElementById('url').innerHTML = '';
+      const url = document.createElement('a');
+      url.href = channel.playbackUrl;
+      url.textContent = channel.playbackUrl;
+      const demo = document.createElement('a');
+      demo.href = `https://hls-js.netlify.app/demo/?src=${encodeURIComponent(channel.playbackUrl)}`;
+      demo.target = '_blank';
+      demo.textContent = 'open in the hls.js demo';
+      document.getElementById('url').append(url, ' · ', demo);
+
       if (hls) hls.destroy();
+      hls = null;
+      lastCc = null;
       levelSelect.length = 1;
-      if (window.Hls && Hls.isSupported()) {
+      video.removeAttribute('src');
+      log(`loading ${channel.id} with ${nativeBox.checked ? 'native HLS' : 'hls.js'}`);
+
+      if (!nativeBox.checked && window.Hls && Hls.isSupported()) {
         hls = new Hls({ lowLatencyMode: false });
         hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
-          data.levels.forEach((level, i) => levelSelect.add(new Option(`${level.height}p · ${Math.round(level.bitrate / 1000)} kbps`, i)));
+          data.levels.forEach((level, i) => levelSelect.add(new Option(levelName(level), i)));
+          log(`master: ${data.levels.length} rendition(s): ${data.levels.map((l) => `${l.height}p`).join(', ')}`);
           video.play().catch(() => {});
         });
-        hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
-          const level = hls.levels[data.level];
-          document.getElementById('current').textContent = level ? `${level.height}p` : '–';
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => log(`switched to ${levelName(hls.levels[data.level])}`));
+        hls.on(Hls.Events.FRAG_CHANGED, (_e, data) => {
+          // cc is hls.js's discontinuity counter: it changes when playback crosses an EXT-X-DISCONTINUITY.
+          if (lastCc !== null && data.frag.cc !== lastCc) log(`crossed a discontinuity at segment ${data.frag.sn} (cc ${data.frag.cc})`, 'warn');
+          lastCc = data.frag.cc;
         });
-        hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) console.warn('hls.js fatal error', data); });
+        hls.on(Hls.Events.ERROR, (_e, data) => {
+          const what = [data.type, data.details, data.response && data.response.code, data.frag && `segment ${data.frag.sn}`]
+            .filter(Boolean).join(' · ');
+          log(`${data.fatal ? 'FATAL ' : ''}${what}`, data.fatal ? 'bad' : 'warn');
+          if (data.fatal && data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+        });
         hls.loadSource(channel.playbackUrl);
         hls.attachMedia(video);
       } else {
-        video.src = channel.playbackUrl; // Safari plays HLS natively
+        video.src = channel.playbackUrl;
+        video.play().catch(() => {});
       }
       render(lastChannels);
     }
 
-    levelSelect.addEventListener('change', () => { if (hls) hls.currentLevel = Number(levelSelect.value); });
+    for (const type of ['waiting', 'stalled']) video.addEventListener(type, () => log(`video ${type}`, 'warn'));
+    video.addEventListener('error', () => log(`video error: ${video.error ? video.error.message || video.error.code : 'unknown'}`, 'bad'));
+    nativeBox.addEventListener('change', () => { if (selected) play(selected); });
+    levelSelect.addEventListener('change', () => {
+      if (!hls) return;
+      hls.currentLevel = Number(levelSelect.value);
+      log(Number(levelSelect.value) === -1 ? 'rendition: auto' : `rendition pinned to ${levelName(hls.levels[levelSelect.value])}`);
+    });
+
+    function bufferAhead() {
+      const t = video.currentTime;
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= t + 0.1 && t <= video.buffered.end(i)) return video.buffered.end(i) - t;
+      }
+      return 0;
+    }
+
+    function stat(label, value, tone = '') {
+      const div = document.createElement('div');
+      div.className = 'stat';
+      div.innerHTML = '<div class="label"></div><div class="value"></div>';
+      div.firstChild.textContent = label;
+      div.lastChild.textContent = value;
+      if (tone) div.lastChild.classList.add(tone);
+      return div;
+    }
+
     setInterval(() => {
-      document.getElementById('latency').textContent = hls && hls.latency ? `${hls.latency.toFixed(1)}s` : '–';
+      const quality = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+      const level = hls && hls.currentLevel >= 0 ? hls.levels[hls.currentLevel] : null;
+      const buffer = selected ? bufferAhead() : null;
+      const dropped = quality ? quality.droppedVideoFrames : null;
+      const stats = [
+        stat('Playing', hls ? levelName(level) : (selected ? `${video.videoHeight || '?'}p (native)` : '–')),
+        stat('Picture', video.videoWidth ? `${video.videoWidth}×${video.videoHeight}` : '–'),
+        stat('Buffer ahead', buffer === null ? '–' : `${buffer.toFixed(1)}s`, buffer !== null && buffer < 2 && !video.paused ? 'warn' : ''),
+        stat('Behind live edge', hls && hls.latency ? `${hls.latency.toFixed(1)}s` : '–'),
+        stat('Bandwidth est.', hls && hls.bandwidthEstimate ? `${(hls.bandwidthEstimate / 1e6).toFixed(1)} Mbps` : '–'),
+        stat('Dropped frames', quality ? `${dropped} / ${quality.totalVideoFrames}` : '–', dropped ? 'warn' : ''),
+      ];
+      document.getElementById('stats').replaceChildren(...stats);
     }, 1000);
 
     let lastChannels = [];
@@ -94,12 +196,15 @@
         const li = document.createElement('li');
         const button = document.createElement('button');
         button.className = 'channel';
-        button.setAttribute('aria-pressed', String(c.id === selected));
+        button.setAttribute('aria-pressed', String(selected !== null && c.id === selected.id));
         const fps = c.progress && c.progress.fps ? ` · ${c.progress.fps.toFixed(0)} fps · ${c.progress.speed ?? '?'}x` : '';
-        button.innerHTML = `<div class="row"><strong></strong><span class="state ${c.state}">${c.state.replaceAll('_', ' ')}</span></div>
-          <div class="small">${c.spec.input.type} · ${c.spec.mode}${fps}</div>
-          <div class="small ingest"></div><div class="small err"></div>`;
+        button.innerHTML = `<div class="row"><strong></strong><span class="state"></span></div>
+          <div class="small detail"></div><div class="small ingest"></div><div class="small err"></div>`;
         button.querySelector('strong').textContent = c.id;
+        const state = button.querySelector('.state');
+        state.classList.add(c.state);
+        state.textContent = c.state.replaceAll('_', ' ');
+        button.querySelector('.detail').textContent = `${c.spec.input.type} · ${c.spec.mode}${fps}`;
         button.querySelector('.ingest').textContent = c.ingestUrl ? `ingest: ${c.ingestUrl}` : '';
         button.querySelector('.err').textContent = c.lastError && c.state !== 'running' ? `last error: ${c.lastError}` : '';
         button.addEventListener('click', () => play(c));
@@ -115,6 +220,10 @@
         lastChannels = await res.json();
         document.getElementById('api-status').textContent = lastChannels.length ? '' : 'No channels yet. Create one with POST /channels.';
         render(lastChannels);
+        // ?channel=<id> picks a channel on load, so a link can open straight into playback.
+        const wanted = new URLSearchParams(location.search).get('channel');
+        const match = selected === null && lastChannels.find((c) => c.id === wanted);
+        if (match) play(match);
       } catch (err) {
         document.getElementById('api-status').textContent = `Encoder API unreachable (${err.message}). Is npm run dev running?`;
       }
