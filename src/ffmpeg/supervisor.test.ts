@@ -127,11 +127,15 @@ describe('Supervisor', () => {
     const { supervisor, spawner } = makeSupervisor({ restart: 'always' });
     supervisor.start();
     await flush();
-    spawner.last().progress(4);
-    await tick(5_000);
+    // Ten minutes of output in one minute, as an unpaced finite source does: the message counts output, not wall time.
+    for (let t = 1; t <= 600; t++) {
+      spawner.last().progress(t);
+      await tick(100);
+    }
     spawner.last().exit(0);
     await flush();
     assert.equal(supervisor.state, 'restarting');
+    assert.equal(supervisor.status().lastError, 'input ended: ffmpeg exited cleanly after 600s of output');
     await tick(999);
     assert.equal(spawner.children.length, 1);
     await tick(1);

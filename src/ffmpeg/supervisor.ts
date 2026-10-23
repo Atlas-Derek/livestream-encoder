@@ -388,11 +388,17 @@ export class Supervisor {
     }
 
     const lastLine = this.#stderrTail.at(-1);
+    // A clean exit after output flowed means the input ended (a pull source's upstream stopped). Media time, not
+    // wall time: an unpaced finite source can encode minutes of output in seconds.
+    const cleanReason =
+      this.#lastOutTime === null
+        ? 'ffmpeg exited before producing output'
+        : `input ended: ffmpeg exited cleanly after ${Math.round(this.#lastOutTime)}s of output`;
     const reason =
       processError ??
       this.#stallReason ??
       (clean
-        ? 'ffmpeg exited before producing output'
+        ? cleanReason
         : `ffmpeg exited with ${signal === null ? `code ${code}` : `signal ${signal}`}${lastLine ? `: ${lastLine}` : ''}`);
     this.#handleFailure(reason, ranMs);
   }
