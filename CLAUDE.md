@@ -6,7 +6,8 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
 
 ## Commands
 
-- `npm run nginx` — nginx in the foreground with the repo-local config (`nginx/nginx.conf`, prefix = repo root).
+- `npm run nginx` — `scripts/nginx.sh`: writes `var/nginx/playback.conf` from `PLAYBACK_SECRET`, then runs nginx in the
+  foreground with the repo-local config (`nginx/nginx.conf`, prefix = repo root). nginx needs that file.
 - `npm run dev` — API on :3000 with `--watch`. `npm start` without watch.
 - `npm test` — `node --test` over `src/**/*.test.ts`. `npm run typecheck` — `tsc --noEmit`.
 - `npm run sample` — writes `media/sample.mp4` (1080p30 test pattern + tone). `npm run push:rtmp` / `npm run push:srt` —
@@ -94,6 +95,9 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   still lists earlier runs' init sections.
 - nginx must keep the CORS headers and preflight handling (`nginx/cors.conf`, included in every HLS location) and
   `Cache-Control: no-cache` on `.m3u8`. These are what let the hls.js demo page play from localhost.
+- With `PLAYBACK_SECRET`, nginx serves HLS only under `/hls/_s/<expires>/<token>/<channel>/` (`secure_link`, token
+  from `src/api/playback.ts`), and every other `/hls/` location returns 403. Any new `/hls/` location needs the same
+  `$hls_signed_only` check, and the signed location must keep hiding dot-paths and `ffmpeg*.m3u8`.
 - nginx serves HLS on every interface but only proxies `/api/` for localhost: the API can encode any file on disk
   and pull any URL.
 - Secrets (SRT passphrases, `user:password@` in URLs) go through `redactSecrets` before reaching logs, `stderrTail`,

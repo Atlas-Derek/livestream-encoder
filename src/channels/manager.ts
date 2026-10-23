@@ -3,6 +3,7 @@ import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
+import { channelBaseUrl, playbackExpiry } from '../api/playback.ts';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
 import {
@@ -242,8 +243,24 @@ export class ChannelManager {
 
   async listRecordings(id: string): Promise<RecordingStatus[]> {
     this.#entry(id);
-    const base = `${this.#deps.config.publicHlsBaseUrl}/${id}/${RECORDINGS_DIR}`;
+    const base = `${this.#channelUrl(id)}/${RECORDINGS_DIR}`;
     return (await listRecordings(this.#outDir(id))).map((r) => ({ ...r, playbackUrl: `${base}/${r.id}/master.m3u8` }));
+  }
+
+  /** A playback URL valid for ttlSeconds (rounded up to the hour), signed when PLAYBACK_SECRET is set. */
+  playbackUrl(id: string, ttlSeconds: number): { playbackUrl: string; expiresAt: string | null } {
+    this.#entry(id);
+    const expires = playbackExpiry(Date.now(), ttlSeconds);
+    return {
+      playbackUrl: `${this.#channelUrl(id, expires)}/${MASTER_PLAYLIST}`,
+      expiresAt: this.#deps.config.playbackSecret === null ? null : new Date(expires * 1000).toISOString(),
+    };
+  }
+
+  /** Where a channel's files are served: signed when PLAYBACK_SECRET is set. */
+  #channelUrl(id: string, expires = playbackExpiry(Date.now(), this.#deps.config.playbackTokenTtlSeconds)): string {
+    const { publicHlsBaseUrl, playbackSecret } = this.#deps.config;
+    return channelBaseUrl(publicHlsBaseUrl, id, playbackSecret, expires);
   }
 
   async deleteRecording(id: string, recordingId: string): Promise<void> {
@@ -306,7 +323,7 @@ export class ChannelManager {
             onClose: ({ id, durationSec }) =>
               this.#deps.notify?.({
                 event: 'recording.closed', channel: spec.id, recording: id, durationSec,
-                playbackUrl: `${this.#deps.config.publicHlsBaseUrl}/${spec.id}/${RECORDINGS_DIR}/${id}/master.m3u8`,
+                playbackUrl: `${this.#channelUrl(spec.id)}/${RECORDINGS_DIR}/${id}/${MASTER_PLAYLIST}`,
               }),
           })
         : null;
@@ -487,7 +504,7 @@ export class ChannelManager {
   #status(entry: Entry): ChannelStatus {
     const { record, supervisor, publisher, recorder } = entry;
     const { spec, port } = record;
-    const { ingestHost, publicHlsBaseUrl } = this.#deps.config;
+    const { ingestHost } = this.#deps.config;
     let ingestUrl: string | null = null;
     if (spec.input.type === 'rtmp') ingestUrl = `rtmp://${ingestHost}:${port}/live/${spec.input.streamKey}`;
     if (spec.input.type === 'srt') ingestUrl = `srt://${ingestHost}:${port}?mode=caller`;
@@ -500,7 +517,7 @@ export class ChannelManager {
       desired: record.desired,
       completedAt: record.completedAt,
       ingestUrl,
-      playbackUrl: `${publicHlsBaseUrl}/${spec.id}/master.m3u8`,
+      playbackUrl: `${this.#channelUrl(spec.id)}/${MASTER_PLAYLIST}`,
       recording: recorder?.current ?? null,
       ...status,
       // The publisher remembers the last run's segments, which only matter while it runs.

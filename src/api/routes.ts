@@ -7,6 +7,7 @@ import { formatMetrics } from './metrics.ts';
 
 const IdParamsSchema = z.object({ id: z.string() });
 const RecordingParamsSchema = z.object({ id: z.string(), recording: z.string() });
+const PlaybackQuerySchema = z.object({ ttlSeconds: z.coerce.number().int().positive().max(30 * 24 * 3600).default(6 * 3600) });
 
 function parseId(params: unknown): string {
   return IdParamsSchema.parse(params).id;
@@ -46,6 +47,10 @@ export function registerRoutes(app: FastifyInstance, manager: ChannelManager): v
   app.post('/channels/:id/start', async (request) => manager.start(parseId(request.params)));
 
   app.post('/channels/:id/stop', async (request) => manager.stop(parseId(request.params)));
+
+  app.get('/channels/:id/playback-url', async (request) =>
+    manager.playbackUrl(parseId(request.params), PlaybackQuerySchema.parse(request.query).ttlSeconds),
+  );
 
   app.get('/channels/:id/recordings', async (request) => manager.listRecordings(parseId(request.params)));
 

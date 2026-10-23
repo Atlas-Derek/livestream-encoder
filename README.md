@@ -69,6 +69,7 @@ Playback URL: `http://localhost:8080/hls/<id>/master.m3u8`.
 | `DELETE /channels/:id` | Stop the channel and delete its output, recordings included |
 | `GET /channels/:id/recordings` | The channel's recordings: `id`, `startedAt`, `durationSec`, `open` (still being written), `variants`, `playbackUrl` |
 | `DELETE /channels/:id/recordings/:recording` | Delete a recording (409 while it is being written) |
+| `GET /channels/:id/playback-url?ttlSeconds=21600` | A playback URL valid for that long (rounded up to the hour), signed when `PLAYBACK_SECRET` is set: `{playbackUrl, expiresAt}` |
 | `GET /metrics` | Prometheus metrics per channel: `lse_channel_state` (one-hot), `lse_channel_desired_running`, `lse_channel_restarts_total`, `lse_channel_uptime_seconds`, `lse_channel_realtime_factor`, `lse_channel_fps`, `lse_channel_warnings`, `lse_channel_recording`. Scrape `http://127.0.0.1:3000/metrics`. |
 
 Channel options:
@@ -205,8 +206,31 @@ Live sources besides OBS:
 | `INGEST_HOST` | `localhost` (the hostname shown in ingest URLs) |
 | `VAR_DIR` / `HLS_ROOT` | `var` / `var/hls` |
 | `LOG_LEVEL` | `info` (`debug` also logs every ffmpeg stderr line) |
+| `PLAYBACK_SECRET` | none. Set it for both `npm run nginx` and the API to serve HLS only through signed URLs (see [Signed playback URLs](#signed-playback-urls)). At least 16 letters, digits, `_` or `-` |
+| `PLAYBACK_TOKEN_TTL_SECONDS` | `21600`. How long the signed `playbackUrl` in a channel's status stays valid |
 | `WEBHOOK_URLS` | none. Comma-separated http(s) URLs that get a JSON POST for each channel state change and each closed recording (see [Webhooks](#webhooks)) |
 | `WEBHOOK_SECRET` | none. When set, each webhook carries `X-LSE-Signature: sha256=<HMAC-SHA256 of the body>` |
+
+### Signed playback URLs
+
+With `PLAYBACK_SECRET` set (the same value for `npm run nginx` and the API), nginx answers plain `/hls/…` requests
+with 403 and plays only signed URLs:
+
+```
+http://localhost:8080/hls/_s/<expires>/<token>/<channel>/master.m3u8
+```
+
+- The token is nginx's `secure_link_md5` of `<expires><channel> <secret>`. It covers one channel, recordings
+  included, until `<expires>` (Unix seconds): after that, 410.
+- It sits in the path, not the query string, because playlists list renditions and segments as relative URIs. Those
+  resolve under the signed prefix, so every request a player makes is signed too.
+- The API hands out signed URLs everywhere it reports one: `playbackUrl` in a channel's status (valid for
+  `PLAYBACK_TOKEN_TTL_SECONDS`), recordings, webhooks, and `GET /channels/:id/playback-url?ttlSeconds=` for your own
+  site to give each viewer. Expiry is rounded up to the hour, so viewers who start around the same time share URLs.
+- A player still watching when its URL expires gets 410 for new segments; reloading the page gets a fresh URL. Pick a
+  TTL longer than a viewing session.
+- `scripts/nginx.sh` writes the secret to `var/nginx/playback.conf` (mode 600) on every start. Without a secret,
+  playback is open as before and signed paths are 404.
 
 ### Webhooks
 

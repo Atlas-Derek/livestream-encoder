@@ -28,6 +28,10 @@ export interface Config {
   /** POSTed channel and recording events (src/notify/webhooks.ts). */
   webhookUrls: string[];
   webhookSecret: string | null;
+  /** When set, playback URLs are signed (src/api/playback.ts) and nginx serves only signed ones (scripts/nginx.sh). */
+  playbackSecret: string | null;
+  /** How long a signed playback URL from the channel status stays valid. */
+  playbackTokenTtlSeconds: number;
 }
 
 const FFMPEG_FULL_BIN = '/opt/homebrew/opt/ffmpeg-full/bin';
@@ -57,6 +61,14 @@ function readEncoder(env: NodeJS.ProcessEnv): VideoEncoder {
   const raw = env.VIDEO_ENCODER ?? 'libx264';
   if (raw === 'libx264' || raw === 'h264_videotoolbox') return raw;
   throw new Error(`VIDEO_ENCODER must be libx264 or h264_videotoolbox, got "${raw}"`);
+}
+
+function readSecret(env: NodeJS.ProcessEnv, key: string): string | null {
+  const raw = env[key];
+  if (raw === undefined || raw === '') return null;
+  // Written into nginx's config by scripts/nginx.sh, so nothing that needs quoting.
+  if (!/^[A-Za-z0-9_-]{16,}$/.test(raw)) throw new Error(`${key} must be at least 16 letters, digits, _ or -`);
+  return raw;
 }
 
 function readUrls(env: NodeJS.ProcessEnv, key: string): string[] {
@@ -96,5 +108,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     liveListSize: readInt(env, 'LIVE_LIST_SIZE', 6),
     webhookUrls: readUrls(env, 'WEBHOOK_URLS'),
     webhookSecret: env.WEBHOOK_SECRET || null,
+    playbackSecret: readSecret(env, 'PLAYBACK_SECRET'),
+    playbackTokenTtlSeconds: readInt(env, 'PLAYBACK_TOKEN_TTL_SECONDS', 6 * 3600),
   };
 }

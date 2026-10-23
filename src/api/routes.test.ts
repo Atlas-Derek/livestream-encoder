@@ -82,4 +82,30 @@ describe('routes', () => {
     assert.deepEqual((await app.inject({ method: 'GET', url: '/channels/rec/recordings' })).json(), []);
     assert.equal((await app.inject({ method: 'GET', url: '/channels/nope/recordings' })).statusCode, 404);
   });
+
+  it('mints playback URLs, signed when a secret is set', async () => {
+    await app.inject({ method: 'POST', url: '/channels', payload: { id: 'open', input: { type: 'srt' } } });
+    assert.deepEqual((await app.inject({ method: 'GET', url: '/channels/open/playback-url' })).json(), {
+      playbackUrl: 'http://localhost:8080/hls/open/master.m3u8', expiresAt: null,
+    });
+    assert.equal((await app.inject({ method: 'GET', url: '/channels/open/playback-url?ttlSeconds=0' })).statusCode, 400);
+
+    const signed = new ChannelManager({
+      config: loadConfig({ VAR_DIR: varDir, PLAYBACK_SECRET: 'test-secret-0123456789' }),
+      logger: silentLogger,
+      defaultLadder: [{ name: '720p', height: 720, videoBitrateKbps: 2800, audioBitrateKbps: 128 }],
+      spawn: fakeSpawner({ exitOnKill: true }).spawn,
+      killStale: async () => {},
+      renderSlate: async () => {},
+    });
+    await signed.init();
+    try {
+      const { playbackUrl, expiresAt } = signed.playbackUrl('open', 3600);
+      assert.match(playbackUrl, /^http:\/\/localhost:8080\/hls\/_s\/\d+\/[A-Za-z0-9_-]{22}\/open\/master\.m3u8$/);
+      assert.match(expiresAt ?? '', /T\d\d:00:00\.000Z$/);
+      assert.match(signed.get('open').playbackUrl, /\/hls\/_s\//, 'the status URL is signed too');
+    } finally {
+      await signed.shutdown();
+    }
+  });
 });
