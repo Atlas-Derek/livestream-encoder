@@ -7,7 +7,9 @@ import {
   buildSlateArgs,
   colorPlan,
   inputArgs,
+  publishedWindow,
   redactSecrets,
+  retainedAfterRemoval,
   rungFps,
   rungVideoKbps,
   selectRungs,
@@ -55,6 +57,21 @@ describe('selectRungs', () => {
 
   it('falls back to one rendition at source height when the source is smaller than every rung', () => {
     assert.deepEqual(selectRungs(LADDER, 241), [{ ...LADDER[2], height: 240 }]);
+  });
+});
+
+describe('DVR window and segment retention', () => {
+  it('lengthens the published window to cover the DVR window, and keeps segments on disk to match', () => {
+    assert.equal(publishedWindow(spec({ type: 'srt' }), ENCODER), 6);
+    assert.equal(retainedAfterRemoval(6), 7, 'one segment plus the playlist');
+
+    const dvr = spec({ type: 'srt' }, { dvrWindowSeconds: 120 });
+    assert.equal(publishedWindow(dvr, ENCODER), 30);
+    const { args } = buildArgs(dvr, { outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER });
+    // ffmpeg keeps at most its own list size + 1 removed segments, whatever the threshold, so its list is the window.
+    assert.equal(valueOf(args, '-hls_list_size'), '30');
+    assert.equal(valueOf(args, '-hls_delete_threshold'), '31');
+    assert.equal(publishedWindow(spec({ type: 'srt' }, { dvrWindowSeconds: 10 }), ENCODER), 6, 'never shorter than the live window');
   });
 });
 

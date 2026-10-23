@@ -76,6 +76,8 @@ export const ChannelSpecSchema = z
     passthrough: z.boolean().default(false),
     /** Burns each rendition's name into its picture, so ABR switches are visible in the player. For testing. */
     debugOverlay: z.boolean().default(false),
+    /** Live only: how far back players can seek. Without it, the live window is LIVE_LIST_SIZE segments. */
+    dvrWindowSeconds: z.number().int().positive().max(6 * 3600).optional(),
   })
   .superRefine((spec, ctx) => {
     if (spec.mode === 'vod' && !(spec.input.type === 'file' && !spec.input.loop)) {
@@ -83,6 +85,9 @@ export const ChannelSpecSchema = z
     }
     if (spec.passthrough && spec.ladder) {
       ctx.addIssue({ code: 'custom', path: ['ladder'], message: 'passthrough produces a single rendition; omit ladder' });
+    }
+    if (spec.mode === 'vod' && spec.dvrWindowSeconds !== undefined) {
+      ctx.addIssue({ code: 'custom', path: ['dvrWindowSeconds'], message: 'a DVR window is for live channels; VOD lists every segment' });
     }
     if (spec.passthrough && spec.debugOverlay) {
       ctx.addIssue({ code: 'custom', path: ['debugOverlay'], message: 'passthrough does not re-encode, so it cannot draw an overlay' });

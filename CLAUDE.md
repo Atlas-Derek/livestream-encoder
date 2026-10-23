@@ -72,8 +72,9 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   served directory and swapped in (`publishVodOutput`) once it completes, so a rebuild keeps serving the previous
   output and a failed one never replaces it. nginx returns 404 for dot-paths under `/hls/`.
 - A segment that leaves the live playlist stays on disk for one segment plus the playlist's duration (RFC 8216
-  6.2.2): `-hls_delete_threshold` is `liveListSize + 1` (ffmpeg's default keeps one), and the sweep keeps
-  unreferenced files younger than that window.
+  6.2.2): `-hls_delete_threshold` is the window + 1 (ffmpeg's default keeps one), and the sweep keeps unreferenced
+  files younger than that. The threshold is only a cap: ffmpeg keeps at most its own list size + 1 removed segments,
+  so with a DVR window ffmpeg's `-hls_list_size` is the whole published window.
 - Segment and init names carry a per-run id (`seg_<runId>_<n>`, `init_<runId>[_<variant>].mp4`), so a URL never
   changes content and can be cached for a day. Numbering alone isn't enough: it restarts when a channel is
   recreated or a VOD rebuilt. The run id also marks run boundaries for the publisher.

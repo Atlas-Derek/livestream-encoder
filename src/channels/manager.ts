@@ -5,7 +5,15 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
-import { buildArgs, buildSlateArgs, liveRetainedSegments, redactSecrets, slateId, type SlateOptions } from '../ffmpeg/buildArgs.ts';
+import {
+  buildArgs,
+  buildSlateArgs,
+  publishedWindow,
+  redactSecrets,
+  retainedAfterRemoval,
+  slateId,
+  type SlateOptions,
+} from '../ffmpeg/buildArgs.ts';
 import { killStaleFfmpeg, writePidFile } from '../ffmpeg/pids.ts';
 import { createProbe, createSegmentStreamProbe, type ProbeFn } from '../ffmpeg/probe.ts';
 import { fillStreamInfo, type ProbeSegmentStreams } from '../hls/codecs.ts';
@@ -257,7 +265,7 @@ export class ChannelManager {
             probeStreams: this.#probeStreams,
             segmentSeconds: this.#deps.config.segmentSeconds,
             passthrough: spec.passthrough,
-            windowSize: this.#deps.config.liveListSize,
+            windowSize: publishedWindow(spec, this.#deps.config),
           })
         : null;
     return { record, publisher, supervisor: this.#makeSupervisor(record, publisher), publishError: null };
@@ -380,8 +388,8 @@ export class ChannelManager {
       probe,
       encoder: config,
     });
-    // Segments the last run left behind stay as long as ffmpeg would have kept them.
-    const retainMs = liveRetainedSegments(config.liveListSize) * config.segmentSeconds * 1000;
+    // Segments the last run left behind stay available as long as a player may still have them listed.
+    const retainMs = retainedAfterRemoval(publishedWindow(spec, config)) * config.segmentSeconds * 1000;
     await prepareOutputDir(outDir, variants, spec.mode, retainMs);
     if (spec.mode === 'live' && rungs !== null) {
       await this.#prepareSlate(spec.id, { outDir, rungs, hasAudio, segmentType: spec.segmentType, encoder: config });

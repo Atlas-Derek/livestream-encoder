@@ -75,6 +75,7 @@ Channel options:
 | `mode` | `live` or `vod` | `live` |
 | `segmentType` | `mpegts` or `fmp4` | `mpegts` |
 | `passthrough` | `true` copies the streams without re-encoding (single rendition) | `false` |
+| `dvrWindowSeconds` | Live only: how far back players can seek, up to 6 hours. The published playlist lists that many seconds of segments (at least `LIVE_LIST_SIZE`), and their files are kept for as long. Every playlist refresh then carries the whole window, so keep it to what viewers need. | none |
 | `debugOverlay` | `true` prints each rendition's name in its picture, for watching ABR switches. Not with passthrough. | `false` |
 | `ladder` | per-channel list of rungs: `[{name, height, videoBitrateKbps, audioBitrateKbps, maxFps?}]`. `height` is the short side, so it is the width for portrait sources. | `config/ladder.json` |
 | `input.latencyMs` (srt) | How long SRT waits for lost packets to be resent. The connection uses the larger of this and the publisher's setting, so publishers needn't change theirs. libsrt's 120ms default suits a LAN; over the internet allow several round trips. It adds to latency, but HLS already adds 10s or more. | `1000` |
@@ -293,7 +294,7 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
   -hls_segment_filename var/hls/loop/%v/seg_<run>_%05d.ts       #    <run> is unique per ffmpeg run
   -master_pl_name ffmpeg-master.m3u8
   -var_stream_map "v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p v:3,a:3,name:360p"
-  -hls_list_size 6
+  -hls_list_size 6 -hls_delete_threshold 7
   -hls_flags delete_segments+independent_segments+temp_file+program_date_time+append_list+omit_endlist
   var/hls/loop/%v/ffmpeg.m3u8                                      # %v becomes the rendition name; the app
                                                                    #   publishes these as master.m3u8/index.m3u8
@@ -412,7 +413,8 @@ The live flags, and what each one is for:
 
 | Flag | Purpose |
 |---|---|
-| `-hls_list_size 6` | Only the newest 6 segments (24s) are listed. The player re-fetches the playlist about every target duration to discover new ones. |
+| `-hls_list_size 6` | Only the newest 6 segments (24s) are listed. The player re-fetches the playlist about every target duration to discover new ones. With `dvrWindowSeconds` it is the whole DVR window. |
+| `-hls_delete_threshold 7` | A segment that leaves the window stays on disk for 7 more segments: one segment plus the playlist, as the HLS spec requires, so a player holding a slightly older playlist doesn't get a 404. ffmpeg treats it as a cap and keeps at most its list size + 1. |
 | `delete_segments` | Deletes segment files once they fall out of the window, so disk use stays flat. |
 | `temp_file` | Writes each playlist and segment as `.tmp`, then renames it. nginx never serves a half-written file. |
 | `program_date_time` | Stamps each segment with wall-clock time. Players use it to stay in sync across discontinuities. |

@@ -24,6 +24,13 @@ describe('ChannelSpecSchema', () => {
     assert.equal(parsed.ladder, undefined);
   });
 
+  it('allows a DVR window on live channels only', () => {
+    const parse = (extra: Record<string, unknown>) => ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'file', path: 'a.mp4' }, ...extra });
+    assert.equal(parse({ dvrWindowSeconds: 3600 }).success, true);
+    assert.equal(parse({ dvrWindowSeconds: 3600, mode: 'vod' }).success, false);
+    assert.equal(parse({ dvrWindowSeconds: 7 * 3600 }).success, false);
+  });
+
   it('gives SRT inputs an internet-sized latency by default, within libsrt-sane bounds', () => {
     const input = (extra: Record<string, unknown> = {}) => ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'srt', ...extra } });
     assert.deepEqual(input().data?.input, { type: 'srt', latencyMs: 1000, audio: true });

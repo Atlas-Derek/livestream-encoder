@@ -66,13 +66,21 @@ const LIVE_HLS_FLAGS = [
   'omit_endlist',
 ].join('+');
 
+/** Segments in a channel's published playlists: the live window, or more to cover its DVR window. */
+export function publishedWindow(spec: ChannelSpec, encoder: EncoderConfig): number {
+  return Math.max(encoder.liveListSize, Math.ceil((spec.dvrWindowSeconds ?? 0) / encoder.segmentSeconds));
+}
+
 /**
- * Segments to keep on disk after they leave the live playlist. RFC 8216 6.2.2: a removed segment must stay available
- * for its own duration plus the playlist's, or a player holding an older playlist gets a 404. ffmpeg's default
- * (hls_delete_threshold 1) keeps one. Verified with ffmpeg 9: a threshold of N keeps exactly N unreferenced segments.
+ * Segments that must stay available after one leaves a published playlist of windowSize segments. RFC 8216 6.2.2: a
+ * removed segment must stay available for its own duration plus the playlist's, or a player holding an older playlist
+ * gets a 404.
+ * ffmpeg's hls_delete_threshold is only a cap: verified with ffmpeg 9, it keeps min(threshold, list size + 1) removed
+ * segments (list 6: threshold 1 kept 1, 7 kept 7; list 3: 4, 10 and 38 all kept 4). So ffmpeg's own window is the
+ * published one, DVR included, and the threshold is this; its default of 1 kept a single segment.
  */
-export function liveRetainedSegments(liveListSize: number): number {
-  return liveListSize + 1;
+export function retainedAfterRemoval(windowSize: number): number {
+  return windowSize + 1;
 }
 
 /** ffprobe's color_space names, as the scale filter's in_color_matrix spells them. */
@@ -332,9 +340,11 @@ function hlsArgs(spec: ChannelSpec, outDir: string, runId: string, variants: str
     '-var_stream_map', varStreamMap,
   );
   if (live) {
+    // ffmpeg's playlist is never served, so it can be as long as the DVR window: that is what keeps the files.
+    const windowSize = publishedWindow(spec, encoder);
     args.push(
-      '-hls_list_size', String(encoder.liveListSize),
-      '-hls_delete_threshold', String(liveRetainedSegments(encoder.liveListSize)),
+      '-hls_list_size', String(windowSize),
+      '-hls_delete_threshold', String(retainedAfterRemoval(windowSize)),
       '-hls_flags', LIVE_HLS_FLAGS,
     );
   } else {
