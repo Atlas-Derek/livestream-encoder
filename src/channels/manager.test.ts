@@ -133,7 +133,7 @@ describe('ChannelManager', () => {
     assert.ok(text.includes('ffmpeg spawned'));
     assert.equal(text.includes('correct-horse-battery'), false);
     assert.equal(text.includes('hunter2'), false);
-    assert.deepEqual(manager.get('cam').spec.input, { type: 'pull', url: 'rtsp://admin:********@cam.local/stream' });
+    assert.deepEqual(manager.get('cam').spec.input, { type: 'pull', url: 'rtsp://admin:********@cam.local/stream', loop: true });
   });
 
   it('publishes a live channel’s playlists while ffmpeg runs, and stops before its output is deleted', async () => {
@@ -219,6 +219,27 @@ describe('ChannelManager', () => {
     await waitFor(() => manager.get('once').state === 'completed' && manager.get('cam').state === 'restarting');
     assert.equal(manager.get('once').desired, 'stopped');
     assert.ok(manager.get('once').completedAt);
+  });
+
+  it('completes a pull played once when its finite source ends, and refuses one with no end', async () => {
+    const { manager, spawner } = makeManager({
+      probe: async (input) => ({
+        width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', durationSec: input.endsWith('.mp4') ? 60 : null,
+      }),
+    });
+    await manager.init();
+    await manager.create(spec({ id: 'clip', input: { type: 'pull', url: 'https://x/clip.mp4', loop: false } }));
+    await manager.create(spec({ id: 'cam', input: { type: 'pull', url: 'rtsp://cam.local/stream', loop: false } }));
+
+    await waitFor(() => spawner.calls.length === 1 && manager.get('cam').lastError !== null);
+    assert.ok(spawner.calls[0]?.includes('https://x/clip.mp4'), 'the live source never reaches ffmpeg');
+    assert.match(manager.get('cam').lastError ?? '', /"loop": false needs a finite source/);
+
+    spawner.last().progress(4);
+    await waitFor(() => manager.get('clip').state === 'running');
+    spawner.last().exit(0);
+    await waitFor(() => manager.get('clip').state === 'completed');
+    assert.equal(manager.get('clip').desired, 'stopped');
   });
 
   it('drops RTMP publishers with the wrong key, and video-only publishers unless declared', async () => {

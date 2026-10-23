@@ -62,22 +62,33 @@ describe('inputArgs', () => {
   });
 
   it('uses TCP and the demuxer timeout for RTSP pulls', () => {
-    assert.deepEqual(inputArgs({ type: 'pull', url: 'rtsp://cam/stream' }, 'live', null), [
+    assert.deepEqual(inputArgs({ type: 'pull', url: 'rtsp://cam/stream', loop: true }, 'live', null), [
       '-rtsp_transport', 'tcp', '-timeout', '10000000', '-i', 'rtsp://cam/stream',
     ]);
   });
 
   it('uses rw_timeout for other pulls', () => {
-    assert.deepEqual(inputArgs({ type: 'pull', url: 'https://x/live.m3u8' }, 'live', null), [
+    assert.deepEqual(inputArgs({ type: 'pull', url: 'https://x/live.m3u8', loop: true }, 'live', null), [
       '-rw_timeout', '10000000', '-i', 'https://x/live.m3u8',
     ]);
   });
 
   it('paces a pull whose source has a duration (an HTTP file or VOD playlist)', () => {
-    assert.deepEqual(inputArgs({ type: 'pull', url: 'https://x/vod.m3u8' }, 'live', null, { ...PROBE_1080, durationSec: 60 }), [
+    assert.deepEqual(inputArgs({ type: 'pull', url: 'https://x/vod.m3u8', loop: true }, 'live', null, { ...PROBE_1080, durationSec: 60 }), [
       '-re', '-rw_timeout', '10000000', '-i', 'https://x/vod.m3u8',
     ]);
-    assert.equal(inputArgs({ type: 'pull', url: 'https://x/live.m3u8' }, 'live', null, PROBE_1080).includes('-re'), false);
+    assert.equal(inputArgs({ type: 'pull', url: 'https://x/live.m3u8', loop: true }, 'live', null, PROBE_1080).includes('-re'), false);
+  });
+
+  it('plays a finite pull once, and refuses a live one that would end at its first dropout', () => {
+    const once = { type: 'pull', url: 'https://x/clip.mp4', loop: false } as const;
+    assert.deepEqual(inputArgs(once, 'live', null, { ...PROBE_1080, durationSec: 60 }), [
+      '-re', '-rw_timeout', '10000000', '-i', 'https://x/clip.mp4',
+    ]);
+    assert.throws(
+      () => inputArgs(once, 'live', null, PROBE_1080),
+      (err) => err instanceof AppError && err.status === 422 && /finite source/.test(err.message),
+    );
   });
 
   it('listens for RTMP on the assigned port and key', () => {

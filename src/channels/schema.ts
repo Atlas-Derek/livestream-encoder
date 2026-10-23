@@ -26,6 +26,11 @@ const FileInputSchema = z.object({
 const PullInputSchema = z.object({
   type: z.literal('pull'),
   url: z.url({ protocol: /^(rtsps?|rtmps?|https?|srt|udp)$/ }),
+  /**
+   * true: start again whenever ffmpeg exits, since a live source ending usually means the upstream dropped.
+   * false: play a finite source (an HTTP file, a VOD playlist) once; the channel completes when it ends.
+   */
+  loop: z.boolean().default(true),
 });
 
 /**

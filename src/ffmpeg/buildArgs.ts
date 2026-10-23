@@ -109,6 +109,10 @@ export function inputArgs(
       // A finite source (an HTTP file, a VOD playlist) would otherwise be read as fast as the CPU allows and race
       // through the live window. Live sources pace themselves, and -re on them only adds latency.
       const pace = probe?.durationSec != null ? ['-re'] : [];
+      // Played once, a live source would complete the channel at its first dropout instead of reconnecting.
+      if (!input.loop && pace.length === 0) {
+        throw new AppError('"loop": false needs a finite source (an HTTP file or VOD playlist); ffprobe reports no duration', 422);
+      }
       // The RTSP demuxer has its own socket timeout; every other protocol honours rw_timeout (microseconds).
       return input.url.startsWith('rtsp')
         ? [...pace, '-rtsp_transport', 'tcp', '-timeout', '10000000', '-i', input.url]

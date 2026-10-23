@@ -23,4 +23,13 @@ describe('ChannelSpecSchema', () => {
     assert.equal(parsed.segmentType, 'mpegts');
     assert.equal(parsed.ladder, undefined);
   });
+
+  it('keeps pull channels reconnecting unless loop is turned off', () => {
+    // Also what channels.json written before the option existed parses to.
+    assert.deepEqual(ChannelSpecSchema.parse({ id: 'a', input: { type: 'pull', url: 'rtsp://cam/s' } }).input, {
+      type: 'pull', url: 'rtsp://cam/s', loop: true,
+    });
+    const once = { type: 'pull', url: 'https://x/clip.mp4', loop: false };
+    assert.deepEqual(ChannelSpecSchema.parse({ id: 'a', input: once }).input, once);
+  });
 });

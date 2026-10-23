@@ -95,7 +95,8 @@ function publisherCheck(spec: ChannelSpec): ((line: string) => string | null) | 
 
 function restartPolicy(spec: ChannelSpec): RestartPolicy {
   if (spec.mode === 'vod') return 'never';
-  if (spec.input.type === 'file' && !spec.input.loop) return 'on-failure';
+  // Played once: a clean exit means the input ended.
+  if ((spec.input.type === 'file' || spec.input.type === 'pull') && !spec.input.loop) return 'on-failure';
   return 'always';
 }
 

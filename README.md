@@ -50,9 +50,13 @@ curl -XPOST localhost:3000/channels -H 'content-type: application/json' \
   -d '{"id":"srt1","input":{"type":"srt","passphrase":"correct-horse-battery"}}'
 npm run push:srt -- 'srt://localhost:9000?mode=caller&passphrase=correct-horse-battery&pbkeylen=16'
 
-# Pull an existing stream
+# Pull an existing stream (reconnects whenever the source drops or ends)
 curl -XPOST localhost:3000/channels -H 'content-type: application/json' \
   -d '{"id":"cam","input":{"type":"pull","url":"rtsp://camera.local/stream"}}'
+
+# Play an HTTP file or VOD playlist once, live; the channel completes when it ends
+curl -XPOST localhost:3000/channels -H 'content-type: application/json' \
+  -d '{"id":"once","input":{"type":"pull","url":"https://example.com/clip.mp4","loop":false}}'
 ```
 
 Playback URL: `http://localhost:8080/hls/<id>/master.m3u8`.
@@ -155,7 +159,11 @@ Live sources besides OBS:
   (`npm run push:rtmp -- rtmp://localhost:1935/test` after moving this app's RTMP ports with `RTMP_PORTS`), then
   pull `rtsp://localhost:8554/test` or `rtmp://localhost:1935/test`.
 - **HLS pull:** pull another channel's output, e.g. `http://localhost:8080/hls/loop/master.m3u8`. A VOD playlist or
-  an HTTP file is read in real time (`-re` is added because ffprobe reports a duration).
+  an HTTP file is read in real time (`-re` is added because ffprobe reports a duration). By default it starts over
+  when it ends; with `"loop": false` the channel completes instead. `loop: false` is refused (`lastError`) for a
+  source with no duration, which would otherwise end for good at its first dropout. The HTTP server must support
+  Range requests (nginx does; `python3 -m http.server` doesn't): without them ffprobe finds no duration, and an MP4
+  fails to open.
 
 ### Things to break
 
@@ -441,7 +449,7 @@ Each channel has one `Supervisor`, which runs this state machine:
                          └─(file/pull)───────────────────────────first output──▶ running
 
  starting / waiting / running ──ffmpeg exits──▶ restarting ──after delay──▶ starting …
-                                           ├──▶ completed   (VOD done, or a non-looping live file ended)
+                                           ├──▶ completed   (VOD done, or a live file or pull with loop: false ended)
                                            └──▶ error       (VOD failed; it is never retried)
 
  any state ──stop──▶ stopping ──▶ stopped
@@ -461,9 +469,9 @@ Each channel has one `Supervisor`, which runs this state machine:
 | Channel | Policy | ffmpeg exits cleanly (code 0) | ffmpeg fails |
 |---|---|---|---|
 | VOD | never | `completed` | `error` |
-| Live file, no loop | on failure | `completed` (the file ended) | restart with backoff |
+| Live file, or pull with `loop: false` | on failure | `completed` (the input ended) | restart with backoff |
 | RTMP / SRT | always | publisher left: re-arm the listener immediately | restart with backoff |
-| Pull, looping file | always | restart with backoff | restart with backoff |
+| Pull (default), looping file | always | restart with backoff | restart with backoff |
 
 - **Backoff.**
   - Waits of 1s, 2s, 4s, 8s, … between attempts, capped at 30s, so a dead source isn't hammered.
