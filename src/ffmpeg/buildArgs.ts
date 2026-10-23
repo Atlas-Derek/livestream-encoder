@@ -156,6 +156,17 @@ export function rungFps(sourceFps: number, maxFps: number | undefined): number {
   return maxFps === undefined ? sourceFps : sourceFps / Math.ceil(sourceFps / maxFps);
 }
 
+/**
+ * Lets ffmpeg's HTTP client resume where a dropped connection left off (a Range request for a file, a new request for
+ * a stream or an HLS playlist) instead of failing the run, which would restart ffmpeg and add a discontinuity.
+ * Verified: a server cutting the connection 1MB into a 2.2MB file ended playback at 2.7s of 6s without these; with
+ * them ffmpeg resumed at byte 1000000 and played to the end. An upstream gone for longer still trips rw_timeout or the
+ * stall watchdog, and the supervisor restarts the run.
+ */
+const HTTP_RECONNECT = [
+  '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_on_network_error', '1', '-reconnect_delay_max', '5',
+];
+
 function requirePort(port: number | null, input: Input): number {
   if (port === null) throw new AppError(`${input.type} input has no listener port assigned`, 500);
   return port;
@@ -179,9 +190,10 @@ export function inputArgs(
         throw new AppError('"loop": false needs a finite source (an HTTP file or VOD playlist); ffprobe reports no duration', 422);
       }
       // The RTSP demuxer has its own socket timeout; every other protocol honours rw_timeout (microseconds).
-      return input.url.startsWith('rtsp')
-        ? [...pace, '-rtsp_transport', 'tcp', '-timeout', '10000000', '-i', input.url]
-        : [...pace, '-rw_timeout', '10000000', '-i', input.url];
+      if (input.url.startsWith('rtsp')) {
+        return [...pace, '-rtsp_transport', 'tcp', '-timeout', '10000000', '-i', input.url];
+      }
+      return [...pace, '-rw_timeout', '10000000', ...(input.url.startsWith('http') ? HTTP_RECONNECT : []), '-i', input.url];
     }
     case 'rtmp':
       return ['-listen', '1', '-i', `rtmp://0.0.0.0:${requirePort(port, input)}/live/${input.streamKey}`];

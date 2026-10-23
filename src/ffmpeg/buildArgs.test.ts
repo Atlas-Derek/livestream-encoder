@@ -18,6 +18,8 @@ const PROBE_1080: ProbeResult = {
   durationSec: null,
 };
 
+const RECONNECT = ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_on_network_error', '1', '-reconnect_delay_max', '5'];
+
 const TO_709 = ':in_color_matrix=bt709:out_color_matrix=bt709:out_range=tv';
 
 function spec(input: unknown, extra: Record<string, unknown> = {}) {
@@ -101,15 +103,18 @@ describe('inputArgs', () => {
     ]);
   });
 
-  it('uses rw_timeout for other pulls', () => {
+  it('uses rw_timeout for other pulls, and lets HTTP ones resume after a dropped connection', () => {
     assert.deepEqual(inputArgs({ type: 'pull', url: 'https://x/live.m3u8', loop: true }, 'live', null), [
-      '-rw_timeout', '10000000', '-i', 'https://x/live.m3u8',
+      '-rw_timeout', '10000000', ...RECONNECT, '-i', 'https://x/live.m3u8',
+    ]);
+    assert.deepEqual(inputArgs({ type: 'pull', url: 'srt://x:9000', loop: true }, 'live', null), [
+      '-rw_timeout', '10000000', '-i', 'srt://x:9000',
     ]);
   });
 
   it('paces a pull whose source has a duration (an HTTP file or VOD playlist)', () => {
     assert.deepEqual(inputArgs({ type: 'pull', url: 'https://x/vod.m3u8', loop: true }, 'live', null, { ...PROBE_1080, durationSec: 60 }), [
-      '-re', '-rw_timeout', '10000000', '-i', 'https://x/vod.m3u8',
+      '-re', '-rw_timeout', '10000000', ...RECONNECT, '-i', 'https://x/vod.m3u8',
     ]);
     assert.equal(inputArgs({ type: 'pull', url: 'https://x/live.m3u8', loop: true }, 'live', null, PROBE_1080).includes('-re'), false);
   });
@@ -117,7 +122,7 @@ describe('inputArgs', () => {
   it('plays a finite pull once, and refuses a live one that would end at its first dropout', () => {
     const once = { type: 'pull', url: 'https://x/clip.mp4', loop: false } as const;
     assert.deepEqual(inputArgs(once, 'live', null, { ...PROBE_1080, durationSec: 60 }), [
-      '-re', '-rw_timeout', '10000000', '-i', 'https://x/clip.mp4',
+      '-re', '-rw_timeout', '10000000', ...RECONNECT, '-i', 'https://x/clip.mp4',
     ]);
     assert.throws(
       () => inputArgs(once, 'live', null, PROBE_1080),

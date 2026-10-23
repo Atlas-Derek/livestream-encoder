@@ -166,6 +166,9 @@ Live sources besides OBS:
   source with no duration, which would otherwise end for good at its first dropout. The HTTP server must support
   Range requests (nginx does; `python3 -m http.server` doesn't): without them ffprobe finds no duration, and an MP4
   fails to open.
+- **HTTP(S) pulls resume after a dropped connection** (`-reconnect`): ffmpeg asks for the rest of a file from where
+  it broke off, or reopens a stream or playlist, instead of failing. Without it, a pull of a file with `loop: false`
+  reported `completed` partway through, since ffmpeg took the dropped connection for the end of the file.
 
 ### Things to break
 
