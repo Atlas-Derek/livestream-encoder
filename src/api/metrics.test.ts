@@ -6,7 +6,7 @@ import { formatMetrics } from './metrics.ts';
 
 function channel(id: string, extra: Partial<ChannelStatus> = {}): ChannelStatus {
   return {
-    id, recording: null, thumbnailsUrl: null, spec: ChannelSpecSchema.parse({ id, input: { type: 'srt' } }), port: 9000, desired: 'running',
+    id, recordingEnabled: false, recording: null, thumbnailsUrl: null, spec: ChannelSpecSchema.parse({ id, input: { type: 'srt' } }), port: 9000, desired: 'running',
     completedAt: null, ingestUrl: null, playbackUrl: '', state: 'running', pid: 1, runningSince: null, uptimeSec: 120,
     restarts: 2, lastError: null, lastErrorAt: null, realtimeFactor: 0.998, warnings: [], stderrTail: [],
     progress: { frame: 1, fps: 30, bitrateKbps: 10450.2, speed: 1, outTimeSec: 120 },
@@ -32,8 +32,12 @@ describe('formatMetrics', () => {
     assert.ok(text.endsWith('\n'));
   });
 
-  it('reports whether recording channels are writing a recording', () => {
-    const spec = ChannelSpecSchema.parse({ id: 'r', input: { type: 'srt' }, record: true });
-    assert.match(formatMetrics([channel('r', { spec, recording: '20261023T160000Z' })]), /^lse_channel_recording\{channel="r"\} 1$/m);
+  it('reports whether channels with recording on are writing a recording', () => {
+    const text = formatMetrics([
+      channel('r', { recordingEnabled: true, recording: '20261023T160000Z' }),
+      channel('idle', { recordingEnabled: true }),
+    ]);
+    assert.match(text, /^lse_channel_recording\{channel="r"\} 1$/m);
+    assert.match(text, /^lse_channel_recording\{channel="idle"\} 0$/m);
   });
 });

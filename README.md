@@ -67,6 +67,7 @@ Playback URL: `http://localhost:8080/hls/<id>/master.m3u8`.
 | `GET /channels`, `GET /channels/:id` | State, progress (fps, speed, bitrate), restarts, last error, last 50 ffmpeg log lines, ingest and playback URLs |
 | `POST /channels/:id/start`, `POST /channels/:id/stop` | Start or stop a channel |
 | `DELETE /channels/:id` | Stop the channel and delete its output, recordings included |
+| `POST /channels/:id/recording/start`, `POST /channels/:id/recording/stop` | Record a live channel on demand: from its next segment until stopped (see [Recording](#recording)). Stop is refused (409) for `"record": true` channels, which always record |
 | `GET /channels/:id/recordings` | The channel's recordings: `id`, `startedAt`, `durationSec`, `open` (still being written), `variants`, `playbackUrl` |
 | `DELETE /channels/:id/recordings/:recording` | Delete a recording (409 while it is being written) |
 | `GET /channels/:id/playback-url?ttlSeconds=21600` | A playback URL valid for that long (rounded up to the hour), signed when `PLAYBACK_SECRET` is set: `{playbackUrl, expiresAt}` |
@@ -80,8 +81,8 @@ Channel options:
 | `segmentType` | `mpegts` or `fmp4` | `mpegts` |
 | `passthrough` | `true` copies the streams without re-encoding (single rendition) | `false` |
 | `encrypt` | AES-128 segments, with a new key per ffmpeg run, served beside the master playlist. Use it with `PLAYBACK_SECRET`: otherwise anyone who can load the playlist can fetch the key (`warnings` says so). MPEG-TS only: ffmpeg can't encrypt fMP4. | `false` |
-| `thumbnails` | WebVTT seek thumbnails for VOD output and recordings (see [Seek thumbnails](#seek-thumbnails)). Not for a live window. | `false` |
-| `record` | Live only: keep everything the source sends as VOD recordings (see [Recording](#recording)). | `false` |
+| `thumbnails` | WebVTT seek thumbnails for VOD output, or for a live channel's recordings (see [Seek thumbnails](#seek-thumbnails)). Not for a live window. | `false` |
+| `record` | Live only: record whenever the source is live (see [Recording](#recording)). Without it, record on demand with `POST /channels/:id/recording/start`. | `false` |
 | `dvrWindowSeconds` | Live only: how far back players can seek, up to 6 hours. The published playlist lists that many seconds of segments (at least `LIVE_LIST_SIZE`), and their files are kept for as long. Every playlist refresh then carries the whole window, so keep it to what viewers need. | none |
 | `debugOverlay` | `true` prints each rendition's name in its picture, for watching ABR switches. Not with passthrough. | `false` |
 | `ladder` | per-channel list of rungs: `[{name, height, videoBitrateKbps, audioBitrateKbps, maxFps?}]`. `height` is the short side, so it is the width for portrait sources. | `config/ladder.json` |
@@ -552,13 +553,17 @@ played out, until the source is back:
 
 ### Recording
 
-With `"record": true`, a live channel keeps what its source sends as VOD:
+A live channel records what its source sends as VOD either always (`"record": true`) or on demand:
+`POST /channels/:id/recording/start` records from the next segment, `POST /channels/:id/recording/stop` closes the
+recording. On-demand recording stays on across API restarts until stopped, and the channel status shows
+`recordingEnabled` and the `recording` being written.
 - Each segment the publisher takes from ffmpeg (never the slate) is hard-linked into
   `var/hls/<channel>/recordings/<id>/<rung>/`. Nothing is copied, and ffmpeg deleting its own copy doesn't matter.
 - While it is written, each rendition's playlist is an `EVENT` playlist: players can start from the beginning and
   follow it live. The recording's `master.m3u8` is the channel's (CODECS, FRAME-RATE, start rendition).
-- A recording ends when the source has been down for a segment (when the slate starts) or the channel stops. It
-  becomes VOD (`#EXT-X-ENDLIST`). The next segment from the source starts a new one. A quick ffmpeg restart within a
+- A recording ends when recording is stopped, the source has been down for a segment (when the slate starts), or
+  the channel stops. It becomes VOD (`#EXT-X-ENDLIST`). While recording is on, the next segment from the source
+  starts a new one, so a publisher dropping out splits a recording in two. A quick ffmpeg restart within a
   segment stays in the same recording, after a discontinuity.
 - Recordings left open by a crash are closed when the API starts.
 - The id is the start time, e.g. `20261023T195607Z`. Play one at

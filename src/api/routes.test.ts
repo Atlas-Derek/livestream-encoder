@@ -108,4 +108,13 @@ describe('routes', () => {
       await signed.shutdown();
     }
   });
+
+  it('starts and stops recording', async () => {
+    await app.inject({ method: 'POST', url: '/channels', payload: { id: 'live', input: { type: 'srt' } } });
+    const started = await app.inject({ method: 'POST', url: '/channels/live/recording/start' });
+    assert.deepEqual([started.statusCode, started.json().recordingEnabled], [200, true]);
+    const stopped = await app.inject({ method: 'POST', url: '/channels/live/recording/stop' });
+    assert.deepEqual([stopped.statusCode, stopped.json().recordingEnabled], [200, false]);
+    assert.equal((await app.inject({ method: 'POST', url: '/channels/nope/recording/start' })).statusCode, 404);
+  });
 });

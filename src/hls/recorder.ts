@@ -15,8 +15,8 @@ import {
  * Live-to-VOD recording. Each segment a live channel publishes from its source (not the slate) is hard-linked into
  * <channel>/recordings/<id>/<variant>/, so recording copies nothing and ffmpeg deleting its own copy doesn't matter.
  * While open, each variant's playlist is an EVENT playlist players can follow from the start; closed, it is VOD.
- * A recording closes when the source has been down for a segment (when the slate would start) or the channel stops;
- * the next segment from the source opens a new one.
+ * A recording closes when the source has been down for a segment (when the slate would start), the channel stops, or
+ * recording is turned off; while it is on, the next segment from the source opens a new one.
  */
 export const RECORDINGS_DIR = 'recordings';
 
@@ -95,9 +95,38 @@ export class Recorder implements RecordingSink {
   readonly #opts: RecorderOptions;
   #open: OpenRecording | null = null;
   #error: string | null = null;
+  /** Whether segments are recorded: always for record: true, or between start and stop on demand. */
+  #active: boolean;
+  /** record() and close() run one at a time, so a close can't be overtaken by a write in flight. */
+  #queue: Promise<void> = Promise.resolve();
 
-  constructor(options: RecorderOptions) {
+  constructor(options: RecorderOptions & { active?: boolean }) {
     this.#opts = options;
+    this.#active = options.active ?? true;
+  }
+
+  get active(): boolean {
+    return this.#active;
+  }
+
+  /** Recording on: the next segment opens a recording. */
+  start(): void {
+    this.#active = true;
+  }
+
+  /** Recording off: closes the open recording, if any. */
+  async stop(): Promise<void> {
+    this.#active = false;
+    await this.close();
+  }
+
+  #serial(task: () => Promise<void>): Promise<void> {
+    const run = (async () => {
+      await this.#queue;
+      await task();
+    })();
+    this.#queue = run;
+    return run;
   }
 
   /** The recording being written, if any. */
@@ -111,7 +140,17 @@ export class Recorder implements RecordingSink {
   }
 
   /** Appends segments the publisher just published from the source, opening a recording if none is. */
-  async record(variant: string, variantDir: string, header: string[], segments: Segment[]): Promise<void> {
+  record(variant: string, variantDir: string, header: string[], segments: Segment[]): Promise<void> {
+    return this.#serial(() => this.#record(variant, variantDir, header, segments));
+  }
+
+  /** Turns the open recording into VOD. */
+  close(): Promise<void> {
+    return this.#serial(() => this.#close());
+  }
+
+  async #record(variant: string, variantDir: string, header: string[], segments: Segment[]): Promise<void> {
+    if (!this.#active) return;
     try {
       const recording = this.#open ?? (await this.#start());
       const dir = path.join(recording.dir, variant);
@@ -147,8 +186,7 @@ export class Recorder implements RecordingSink {
     }
   }
 
-  /** Turns the open recording into VOD. */
-  async close(): Promise<void> {
+  async #close(): Promise<void> {
     const recording = this.#open;
     if (recording === null) return;
     this.#open = null;

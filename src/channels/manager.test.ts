@@ -441,6 +441,39 @@ describe('ChannelManager', () => {
     assert.deepEqual(manager.get('vod').warnings, []);
   });
 
+  it('records a live channel on demand, remembers it across a restart, and refuses what cannot be toggled', async () => {
+    const file = await sampleFile();
+    const first = makeManager();
+    await first.manager.init();
+    await first.manager.create(spec({ id: 'live', input: { type: 'srt' } }));
+    await first.manager.create(spec({ id: 'always', input: { type: 'srt' }, record: true }));
+    await first.manager.create(spec({ id: 'vod', input: { type: 'file', path: file }, mode: 'vod' }));
+    assert.equal(first.manager.get('live').recordingEnabled, false);
+    assert.equal(first.manager.get('always').recordingEnabled, true);
+
+    assert.equal((await first.manager.startRecording('live')).recordingEnabled, true);
+    await assert.rejects(first.manager.stopRecording('always'), (err) => err instanceof AppError && err.status === 409);
+    await assert.rejects(first.manager.startRecording('vod'), (err) => err instanceof AppError && err.status === 409);
+    await first.manager.shutdown();
+
+    const second = makeManager();
+    await second.manager.init();
+    assert.equal(second.manager.get('live').recordingEnabled, true, 'still on after a restart');
+    assert.equal((await second.manager.stopRecording('live')).recordingEnabled, false);
+    const stored = JSON.parse(await readFile(path.join(varDir, 'channels.json'), 'utf8'));
+    assert.equal(stored.channels.find((c: { spec: { id: string } }) => c.spec.id === 'live').recordOnDemand, false);
+  });
+
+  it('loads channels.json written before on-demand recording', async () => {
+    await mkdir(varDir, { recursive: true });
+    await writeFile(path.join(varDir, 'channels.json'), JSON.stringify({
+      channels: [{ spec: { id: 'old', input: { type: 'srt' } }, port: 9000, desired: 'stopped', completedAt: null }],
+    }));
+    const { manager } = makeManager();
+    await manager.init();
+    assert.equal(manager.get('old').recordingEnabled, false);
+  });
+
   it('kills stale ffmpeg on boot and keeps a pid file for each running ffmpeg', async () => {
     const swept: string[] = [];
     const { manager, spawner } = makeManager({

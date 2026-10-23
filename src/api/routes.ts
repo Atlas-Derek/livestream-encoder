@@ -52,6 +52,10 @@ export function registerRoutes(app: FastifyInstance, manager: ChannelManager): v
     manager.playbackUrl(parseId(request.params), PlaybackQuerySchema.parse(request.query).ttlSeconds),
   );
 
+  app.post('/channels/:id/recording/start', async (request) => manager.startRecording(parseId(request.params)));
+
+  app.post('/channels/:id/recording/stop', async (request) => manager.stopRecording(parseId(request.params)));
+
   app.get('/channels/:id/recordings', async (request) => manager.listRecordings(parseId(request.params)));
 
   app.delete('/channels/:id/recordings/:recording', async (request, reply) => {

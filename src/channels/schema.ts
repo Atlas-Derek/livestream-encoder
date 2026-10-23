@@ -81,11 +81,14 @@ export const ChannelSpecSchema = z
     debugOverlay: z.boolean().default(false),
     /** Live only: how far back players can seek. Without it, the live window is LIVE_LIST_SIZE segments. */
     dvrWindowSeconds: z.number().int().positive().max(6 * 3600).optional(),
-    /** Live only: keep everything the source sends as VOD recordings, one per uninterrupted stretch. */
+    /**
+     * Live only: record whenever the source is live, as VOD recordings, one per uninterrupted stretch. Without it, a
+     * live channel records only between POST /channels/:id/recording/start and /stop.
+     */
     record: z.boolean().default(false),
     /** AES-128 segments, with a new key per ffmpeg run. Only worth it with signed playback URLs (PLAYBACK_SECRET). */
     encrypt: z.boolean().default(false),
-    /** WebVTT seek thumbnails for VOD output and recordings (src/hls/thumbnails.ts). */
+    /** WebVTT seek thumbnails for VOD output, or a live channel's recordings (src/hls/thumbnails.ts). */
     thumbnails: z.boolean().default(false),
   })
   .superRefine((spec, ctx) => {
@@ -98,11 +101,6 @@ export const ChannelSpecSchema = z
     if (spec.encrypt && spec.segmentType === 'fmp4') {
       // ffmpeg 9's HLS muxer: "Encrypted fmp4 not yet supported".
       ctx.addIssue({ code: 'custom', path: ['encrypt'], message: 'ffmpeg cannot encrypt fMP4 segments; use "segmentType": "mpegts"' });
-    }
-    if (spec.thumbnails && spec.mode === 'live' && !spec.record) {
-      ctx.addIssue({
-        code: 'custom', path: ['thumbnails'], message: 'thumbnails are made for VOD output and recordings; set "record": true',
-      });
     }
     if (spec.mode === 'vod' && spec.record) {
       ctx.addIssue({ code: 'custom', path: ['record'], message: 'recording is for live channels; VOD output is already kept' });

@@ -38,11 +38,11 @@ describe('ChannelSpecSchema', () => {
     assert.match(fmp4.error?.issues[0]?.message ?? '', /cannot encrypt fMP4/);
   });
 
-  it('makes thumbnails for VOD output and recordings only', () => {
+  it('makes thumbnails for VOD output and for any live channel\'s recordings, on demand ones included', () => {
     const parse = (extra: Record<string, unknown>) => ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'file', path: 'a.mp4' }, ...extra });
     assert.equal(parse({ thumbnails: true, mode: 'vod' }).success, true);
     assert.equal(parse({ thumbnails: true, record: true }).success, true);
-    assert.match(parse({ thumbnails: true }).error?.issues[0]?.message ?? '', /set "record": true/);
+    assert.equal(parse({ thumbnails: true }).success, true);
   });
 
   it('allows a DVR window on live channels only', () => {

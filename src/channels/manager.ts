@@ -57,6 +57,8 @@ const ChannelRecordSchema = z.object({
   desired: z.enum(['running', 'stopped']),
   /** Set when a VOD encode finishes, so it isn't re-encoded on the next boot. */
   completedAt: z.string().nullable(),
+  /** Recording started on demand (POST /channels/:id/recording/start) and not stopped yet. */
+  recordOnDemand: z.boolean().default(false),
 });
 export type ChannelRecord = z.infer<typeof ChannelRecordSchema>;
 
@@ -64,7 +66,9 @@ const StoreSchema = z.object({ channels: z.array(ChannelRecordSchema) });
 
 export interface ChannelStatus extends SupervisorStatus {
   id: string;
-  /** The recording being written, for channels with record: true. */
+  /** Live channels: whether segments from the source are being recorded (record: true, or started on demand). */
+  recordingEnabled: boolean;
+  /** The recording being written, if any. */
   recording: string | null;
   /** VOD channels with thumbnails: true, once made: WebVTT seek thumbnails. */
   thumbnailsUrl: string | null;
@@ -101,7 +105,7 @@ interface Entry {
   publisher: PlaylistPublisher | null;
   /** Why the last finished VOD encode couldn't replace the served output; cleared on start. */
   publishError: string | null;
-  /** Live channels with record: true. */
+  /** Live channels; it only records while recording is on. */
   recorder: Recorder | null;
   /** Why the last seek thumbnails couldn't be made; cleared when some are. */
   thumbnailError: string | null;
@@ -216,7 +220,9 @@ export class ChannelManager {
 
   async create(spec: ChannelSpec): Promise<ChannelStatus> {
     if (this.#entries.has(spec.id)) throw new AppError(`channel "${spec.id}" already exists`, 409);
-    const record: ChannelRecord = { spec, port: this.#allocatePort(spec), desired: 'running', completedAt: null };
+    const record: ChannelRecord = {
+      spec, port: this.#allocatePort(spec), desired: 'running', completedAt: null, recordOnDemand: false,
+    };
     const entry = this.#makeEntry(record);
     this.#entries.set(spec.id, entry);
     await this.#persist();
@@ -262,6 +268,33 @@ export class ChannelManager {
       playbackUrl: `${base}/${r.id}/${MASTER_PLAYLIST}`,
       thumbnailsUrl: existsSync(path.join(this.#outDir(id), RECORDINGS_DIR, r.id, THUMBNAILS_VTT)) ? `${base}/${r.id}/${THUMBNAILS_VTT}` : null,
     }));
+  }
+
+  /** Starts recording a live channel on demand: the next segment from its source opens a recording. */
+  async startRecording(id: string): Promise<ChannelStatus> {
+    const entry = this.#recordable(id);
+    entry.record.recordOnDemand = true;
+    await this.#persist();
+    entry.recorder?.start();
+    return this.#status(entry);
+  }
+
+  /** Stops recording started on demand, and closes the recording being written. */
+  async stopRecording(id: string): Promise<ChannelStatus> {
+    const entry = this.#recordable(id);
+    if (entry.record.spec.record) {
+      throw new AppError(`channel "${id}" records whenever it is live ("record": true); recreate it without to stop`, 409);
+    }
+    entry.record.recordOnDemand = false;
+    await this.#persist();
+    await entry.recorder?.stop();
+    return this.#status(entry);
+  }
+
+  #recordable(id: string): Entry {
+    const entry = this.#entry(id);
+    if (entry.recorder === null) throw new AppError(`channel "${id}" is VOD; recording is for live channels`, 409);
+    return entry;
   }
 
   /** A playback URL valid for ttlSeconds (rounded up to the hour), signed when PLAYBACK_SECRET is set. */
@@ -332,8 +365,9 @@ export class ChannelManager {
   #makeEntry(record: ChannelRecord): Entry {
     const { spec } = record;
     const recorder =
-      spec.mode === 'live' && spec.record
+      spec.mode === 'live'
         ? new Recorder({
+            active: spec.record || record.recordOnDemand,
             outDir: this.#outDir(spec.id),
             channel: spec.id,
             logger: this.#deps.logger,
@@ -579,6 +613,7 @@ export class ChannelManager {
       completedAt: record.completedAt,
       ingestUrl,
       playbackUrl: `${this.#channelUrl(spec.id)}/${MASTER_PLAYLIST}`,
+      recordingEnabled: recorder?.active ?? false,
       recording: recorder?.current ?? null,
       thumbnailsUrl:
         spec.mode === 'vod' && spec.thumbnails && existsSync(path.join(this.#outDir(spec.id), THUMBNAILS_VTT))

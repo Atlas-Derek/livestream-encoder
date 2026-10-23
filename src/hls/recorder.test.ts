@@ -95,6 +95,36 @@ describe('Recorder', () => {
   });
 });
 
+describe('Recorder on demand', () => {
+  it('ignores segments while off, records once started, and closes the recording when stopped', async () => {
+    const recorder = new Recorder({ outDir, channel: 'ch', logger: silentLogger, active: false });
+    await recorder.record('720p', variantDir(), HEADER, [await segment('seg_r1_00000.ts')]);
+    assert.equal(recorder.current, null);
+    assert.deepEqual(await listRecordings(outDir), []);
+
+    recorder.start();
+    await recorder.record('720p', variantDir(), HEADER, [await segment('seg_r1_00001.ts')]);
+    const id = recorder.current ?? assert.fail('recording');
+    await recorder.stop();
+    assert.equal(recorder.current, null);
+    assert.equal(recorder.active, false);
+    const [summary] = await listRecordings(outDir);
+    assert.deepEqual([summary?.id, summary?.open, summary?.durationSec], [id, false, 4]);
+    await recorder.record('720p', variantDir(), HEADER, [await segment('seg_r1_00002.ts')]);
+    assert.equal((await listRecordings(outDir)).length, 1, 'nothing more once stopped');
+  });
+
+  it('never lets a write in flight reopen a recording it closed', async () => {
+    const recorder = new Recorder({ outDir, channel: 'ch', logger: silentLogger });
+    const segments = await Promise.all(Array.from({ length: 20 }, (_, i) => segment(`seg_r1_${String(i).padStart(5, '0')}.ts`)));
+    const writing = recorder.record('720p', variantDir(), HEADER, segments);
+    const closing = recorder.close(); // while the links are still being made
+    await Promise.all([writing, closing]);
+    const [summary] = await listRecordings(outDir);
+    assert.deepEqual([summary?.open, summary?.durationSec], [false, 80]);
+  });
+});
+
 describe('recordings on disk', () => {
   it('closes recordings left open, lists them, and deletes only real recording ids', async () => {
     const recorder = new Recorder({ outDir, channel: 'ch', logger: silentLogger });

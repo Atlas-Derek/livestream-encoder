@@ -50,7 +50,7 @@ function perChannel(
 
 /** Pure: GET /metrics, in Prometheus's text format, from the channels' status. */
 export function formatMetrics(channels: ChannelStatus[]): string {
-  const recording = channels.filter((c) => c.spec.mode === 'live' && c.spec.record);
+  const recording = channels.filter((c) => c.recordingEnabled);
   return format([
     {
       name: 'lse_channel_state',
@@ -71,7 +71,7 @@ export function formatMetrics(channels: ChannelStatus[]): string {
     perChannel('lse_channel_fps', 'Frames per second ffmpeg is encoding.', 'gauge', channels, (c) => c.progress?.fps ?? null),
     perChannel('lse_channel_warnings', 'Problems that do not stop the channel (see GET /channels/:id).', 'gauge',
       channels, (c) => c.warnings.length),
-    perChannel('lse_channel_recording', '1 while a recording channel is writing a recording.', 'gauge',
+    perChannel('lse_channel_recording', 'Channels with recording on: 1 while a recording is being written.', 'gauge',
       recording, (c) => (c.recording === null ? 0 : 1)),
   ]);
 }
