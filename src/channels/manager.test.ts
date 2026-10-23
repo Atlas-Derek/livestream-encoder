@@ -202,6 +202,107 @@ describe('ChannelManager', () => {
     assert.ok(second.manager.get('vod').completedAt);
   });
 
+  it('lets a non-looping live file complete, but keeps a pull channel running after a clean exit', async () => {
+    const file = await sampleFile();
+    const { manager, spawner } = makeManager();
+    await manager.init();
+    await manager.create(spec({ id: 'once', input: { type: 'file', path: file } }));
+    await manager.create(spec({ id: 'cam', input: { type: 'pull', url: 'rtsp://cam.local/stream' } }));
+    await waitFor(() => spawner.calls.length === 2);
+    const child = (id: string) => spawner.children[spawner.calls.findIndex((args) => args.some((arg) => arg.includes(id)))];
+
+    for (const [id, input] of [['once', file], ['cam', 'rtsp://cam.local/stream']] as const) {
+      child(input)?.progress(4);
+      await waitFor(() => manager.get(id).state === 'running');
+      child(input)?.exit(0);
+    }
+    await waitFor(() => manager.get('once').state === 'completed' && manager.get('cam').state === 'restarting');
+    assert.equal(manager.get('once').desired, 'stopped');
+    assert.ok(manager.get('once').completedAt);
+  });
+
+  it('drops RTMP publishers with the wrong key, and video-only publishers unless declared', async () => {
+    const { manager, spawner } = makeManager();
+    await manager.init();
+    await manager.create(spec({ id: 'rtmp', input: { type: 'rtmp', streamKey: 'right' } }));
+    await manager.create(spec({ id: 'srt', input: { type: 'srt' } }));
+    await manager.create(spec({ id: 'mute', input: { type: 'srt', audio: false } }));
+    await waitFor(() => spawner.children.length === 3);
+    const [rtmp, srt, mute] = spawner.children;
+    assert.ok(rtmp && srt && mute);
+
+    rtmp.stderr.write('[rtmp @ 0x1] Unexpected stream WRONG, expecting right\n');
+    srt.stderr.write("Stream map '' matches no streams.\n");
+    mute.stderr.write("Stream map '' matches no streams.\n");
+    await waitFor(() => rtmp.signals.length > 0 && srt.signals.length > 0);
+    assert.deepEqual([rtmp.signals, srt.signals, mute.signals], [['SIGKILL'], ['SIGKILL'], []]);
+    await waitFor(() => manager.get('srt').lastError !== null);
+    assert.equal(manager.get('rtmp').lastError, 'rejected publisher with wrong stream key');
+    assert.match(manager.get('srt').lastError ?? '', /"audio": false/);
+  });
+
+  it('re-encodes a completed VOD channel on start', async () => {
+    const file = await sampleFile();
+    const { manager, spawner } = makeManager();
+    await manager.init();
+    await manager.create(spec({ id: 'vod', input: { type: 'file', path: file }, mode: 'vod' }));
+    await waitFor(() => spawner.calls.length === 1);
+    spawner.last().progress(4);
+    await waitFor(() => manager.get('vod').state === 'running');
+    spawner.last().exit(0);
+    await waitFor(() => manager.get('vod').state === 'completed');
+
+    const status = await manager.start('vod');
+    assert.equal(status.completedAt, null);
+    assert.equal(status.desired, 'running');
+    await waitFor(() => spawner.calls.length === 2);
+  });
+
+  it('adds the CODECS ffmpeg left out of a VOD master once the encode completes', async () => {
+    const file = await sampleFile();
+    const probed: string[] = [];
+    const { manager, spawner } = makeManager({
+      probeStreams: async (segment) => {
+        probed.push(path.basename(segment));
+        return { streams: [{ codec_type: 'video', codec_name: 'h264', extradata: '00000000: 0164 001f  .d..' }] };
+      },
+    });
+    await manager.init();
+    await manager.create(spec({ id: 'vod', input: { type: 'file', path: file }, mode: 'vod' }));
+    await waitFor(() => spawner.calls.length === 1);
+
+    // Stand in for ffmpeg, after prepare has wiped the output directory.
+    const outDir = path.join(config.hlsRoot, 'vod');
+    await writeFile(path.join(outDir, '720p', 'index.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nseg_r1_00000.ts\n#EXT-X-ENDLIST\n');
+    await writeFile(path.join(outDir, 'master.m3u8'), '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720p/index.m3u8\n');
+    spawner.last().progress(4);
+    await waitFor(() => manager.get('vod').state === 'running');
+    spawner.last().exit(0);
+
+    await waitFor(() => probed.length === 1);
+    await manager.shutdown(); // waits for the fill
+    assert.equal(await readFile(path.join(outDir, 'master.m3u8'), 'utf8'), '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS="avc1.64001f"\n720p/index.m3u8\n');
+    assert.deepEqual(probed, ['seg_r1_00000.ts']);
+  });
+
+  it('kills stale ffmpeg on boot and keeps a pid file for each running ffmpeg', async () => {
+    const swept: string[] = [];
+    const { manager, spawner } = makeManager({
+      killStale: async (dir) => {
+        swept.push(dir);
+      },
+    });
+    await manager.init();
+    assert.deepEqual(swept, [path.join(varDir, 'pids')]);
+
+    await manager.create(spec({ id: 'push', input: { type: 'srt' } }));
+    const pidFile = path.join(varDir, 'pids', 'push.pid');
+    await waitFor(() => existsSync(pidFile));
+    assert.equal(await readFile(pidFile, 'utf8'), `${spawner.last().pid}\n`);
+    await manager.stop('push');
+    await waitFor(() => !existsSync(pidFile));
+  });
+
   it('refuses to start from a corrupt channels.json instead of silently dropping channels', async () => {
     await writeFile(path.join(varDir, 'channels.json'), JSON.stringify({ channels: [{ spec: { id: 'BAD' } }] }));
     const { manager } = makeManager();
