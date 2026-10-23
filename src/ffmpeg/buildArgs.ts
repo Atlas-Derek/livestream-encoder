@@ -2,6 +2,7 @@ import path from 'node:path';
 import type { ChannelSpec, Input, Rung } from '../channels/schema.ts';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
+import { FFMPEG_MASTER_PLAYLIST, FFMPEG_MEDIA_PLAYLIST, MASTER_PLAYLIST, MEDIA_PLAYLIST } from '../hls/playlist.ts';
 import type { ProbeResult } from './probe.ts';
 
 export type EncoderConfig = Pick<Config, 'videoEncoder' | 'x264Preset' | 'segmentSeconds' | 'liveListSize'>;
@@ -156,22 +157,28 @@ function assertPassthroughCompatible(probe: ProbeResult | null): void {
   }
 }
 
-function hlsArgs(spec: ChannelSpec, outDir: string, runId: string, varStreamMap: string, encoder: EncoderConfig): string[] {
+function hlsArgs(spec: ChannelSpec, outDir: string, runId: string, variants: string[], varStreamMap: string, encoder: EncoderConfig): string[] {
   const ext = spec.segmentType === 'fmp4' ? 'm4s' : 'ts';
+  const live = spec.mode === 'live';
   const args = ['-f', 'hls', '-hls_time', String(encoder.segmentSeconds), '-hls_segment_type', spec.segmentType];
-  if (spec.segmentType === 'fmp4') args.push('-hls_fmp4_init_filename', 'init.mp4');
+  // Per run, so earlier runs' segments keep their own init section. ffmpeg requires %v (the variant name) in a
+  // custom name when there are several variants, but leaves it unexpanded, a literal "%v", when there is one.
+  if (spec.segmentType === 'fmp4') {
+    args.push('-hls_fmp4_init_filename', variants.length > 1 ? `init_${runId}_%v.mp4` : `init_${runId}.mp4`);
+  }
   args.push(
     // append_list keeps counting across runs, so the run id only changes the name, not the sequence number.
     '-hls_segment_filename', path.join(outDir, '%v', `seg_${runId}_%05d.${ext}`),
-    '-master_pl_name', 'master.m3u8',
+    // Live playlists go through the publisher (src/hls/playlist.ts); VOD output is a single run and served as is.
+    '-master_pl_name', live ? FFMPEG_MASTER_PLAYLIST : MASTER_PLAYLIST,
     '-var_stream_map', varStreamMap,
   );
-  if (spec.mode === 'live') {
+  if (live) {
     args.push('-hls_list_size', String(encoder.liveListSize), '-hls_flags', LIVE_HLS_FLAGS);
   } else {
     args.push('-hls_playlist_type', 'vod', '-hls_list_size', '0', '-hls_flags', 'independent_segments+temp_file');
   }
-  args.push(path.join(outDir, '%v', 'index.m3u8'));
+  args.push(path.join(outDir, '%v', live ? FFMPEG_MEDIA_PLAYLIST : MEDIA_PLAYLIST));
   return args;
 }
 
@@ -200,6 +207,6 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
   const varStreamMap = variants
     .map((name, i) => (hasAudio ? `v:${i},a:${i},name:${name}` : `v:${i},name:${name}`))
     .join(' ');
-  args.push(...hlsArgs(spec, outDir, runId, varStreamMap, encoder));
+  args.push(...hlsArgs(spec, outDir, runId, variants, varStreamMap, encoder));
   return { args, variants };
 }

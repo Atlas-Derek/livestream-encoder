@@ -125,7 +125,10 @@ Three programs cooperate, and **they only share files on disk**:
   output into segments and writes the playlists.
 - **The Node app never touches video data.** It works out which ffmpeg command to run, starts it, watches its
   progress, and restarts it when it fails.
-- **nginx is a plain static file server.** It serves the playlists and segments ffmpeg wrote, with the right headers.
+- **For live channels, the Node app republishes ffmpeg's playlists.** ffmpeg's own live playlists are wrong after a
+  restart, so it writes private copies, and the app rewrites them into the ones players fetch (see
+  [Publishing live playlists](#publishing-live-playlists)).
+- **nginx is a plain static file server.** It serves the playlists and segments, with the right headers.
 - **The player** (hls.js or Safari) downloads those files over HTTP and plays them.
 
 | File | Responsibility |
@@ -139,6 +142,8 @@ Three programs cooperate, and **they only share files on disk**:
 | [src/ffmpeg/probe.ts](src/ffmpeg/probe.ts) | Runs ffprobe to learn a source's resolution, frame rate and codecs. |
 | [src/ffmpeg/supervisor.ts](src/ffmpeg/supervisor.ts) | The lifecycle of one ffmpeg process: spawn, progress, watchdog, restarts. |
 | [src/channels/output.ts](src/channels/output.ts) | Gets a channel's output folder ready before each run and cleans up leftovers. |
+| [src/hls/playlist.ts](src/hls/playlist.ts) | Pure functions that turn ffmpeg's live playlists into the ones players fetch. |
+| [src/hls/publisher.ts](src/hls/publisher.ts) | Keeps a live channel's published playlists in step with ffmpeg's while it runs. |
 | [src/ffmpeg/pids.ts](src/ffmpeg/pids.ts) | Pid files, and killing ffmpeg processes orphaned by a crash. |
 | [nginx/nginx.conf](nginx/nginx.conf), [nginx/cors.conf](nginx/cors.conf) | Serves `var/hls` with the correct MIME types, caching and CORS headers. |
 
@@ -184,11 +189,12 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
   -c:a aac -ar 48000 -ac 2 -b:a:0 128k …
   -f hls -hls_time 4 -hls_segment_type mpegts                      # 5. cut into 4s segments
   -hls_segment_filename var/hls/loop/%v/seg_<run>_%05d.ts       #    <run> is unique per ffmpeg run
-  -master_pl_name master.m3u8
+  -master_pl_name ffmpeg-master.m3u8
   -var_stream_map "v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p v:3,a:3,name:360p"
   -hls_list_size 6
   -hls_flags delete_segments+independent_segments+temp_file+program_date_time+append_list+omit_endlist
-  var/hls/loop/%v/index.m3u8                                       # %v becomes the rendition name
+  var/hls/loop/%v/ffmpeg.m3u8                                      # %v becomes the rendition name; the app
+                                                                   #   publishes these as master.m3u8/index.m3u8
 ```
 
 **1. Input.** This is the only part that differs between input types:
@@ -249,14 +255,15 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
 - The playlist ends with `#EXT-X-ENDLIST`.
 - The player knows the total duration and can seek anywhere.
 
-**Live** playlists are a sliding window that ffmpeg rewrites after every segment:
+**Live** playlists are a sliding window, rewritten after every segment. This is the published `index.m3u8`:
 
 ```
 #EXTM3U
 #EXT-X-VERSION:6
 #EXT-X-TARGETDURATION:4
-#EXT-X-MEDIA-SEQUENCE:9                         ← sequence number of the first segment listed
 #EXT-X-INDEPENDENT-SEGMENTS
+#EXT-X-MEDIA-SEQUENCE:9                         ← sequence number of the first segment listed
+#EXT-X-DISCONTINUITY-SEQUENCE:3                 ← discontinuities that have already left the window
 #EXTINF:4.000000,
 #EXT-X-PROGRAM-DATE-TIME:2026-10-20T14:40:22.928-0600
 seg_mvl0a1b2_00009.ts
@@ -283,8 +290,31 @@ Two other modes:
 - **Passthrough** (`-c copy`): no re-encoding. The source's own video and audio are repackaged as a single rendition
   named `source`. It costs almost no CPU, but there is no ABR, and segments break wherever the *source* put its
   keyframes. It needs H.264/HEVC video and AAC/MP3/AC-3 audio.
-- **fMP4** (`segmentType: fmp4`): writes `.m4s` segments plus an `init_<n>.mp4` header per rendition instead of
-  MPEG-TS.
+- **fMP4** (`segmentType: fmp4`): writes `.m4s` segments instead of MPEG-TS, plus an init section (the header every
+  segment needs) per rendition and run: `init_<run>_<rung>.mp4`, or `init_<run>.mp4` for a single rendition.
+
+### Publishing live playlists
+
+ffmpeg's own live playlists go wrong once a channel restarts, which happens every time a publisher reconnects
+(checked with ffmpeg 9):
+- **No `#EXT-X-DISCONTINUITY-SEQUENCE`.** After a restart, `append_list` inserts `#EXT-X-DISCONTINUITY`, but when that
+  tag slides out of the window nothing records it. The HLS spec requires that count, and players use it to line up
+  renditions and timestamps.
+- **One init section for every segment (fMP4).** ffmpeg writes a single `#EXT-X-MAP` for its own run, so segments
+  from the previous run that are still in the window get the new run's init section. If the source changed between
+  runs (a different publisher, resolution or frame rate), those segments won't decode.
+
+So for live channels ffmpeg writes `ffmpeg-master.m3u8` and `<rung>/ffmpeg.m3u8`, and a `PlaylistPublisher` rewrites
+them every 250 ms into the `master.m3u8` and `<rung>/index.m3u8` that players fetch:
+- Run boundaries come from the segment names (`seg_<run>_<n>`). A segment from a new run gets
+  `#EXT-X-DISCONTINUITY`, plus its own run's `#EXT-X-MAP` for fMP4.
+- The previously published playlist provides the rest of the history: each earlier run's init section, and how many
+  discontinuities have already left the window.
+- It writes atomically (`.tmp`, then rename) and only when ffmpeg's file changed. It publishes once more after
+  ffmpeg exits, so the final segments are announced.
+
+nginx returns 404 for `ffmpeg*.m3u8`. VOD output is a single run, so ffmpeg writes `master.m3u8` and `index.m3u8`
+directly.
 
 ### The supervisor: keeping ffmpeg alive
 
@@ -348,8 +378,11 @@ Each channel has one `Supervisor`, which runs this state machine:
 ```
 var/hls/<id>/
 ├── master.m3u8          ← the URL you give a player
+├── ffmpeg-master.m3u8   ← live only: ffmpeg's copy, published as master.m3u8
 ├── 1080p/
 │   ├── index.m3u8       ← variant playlist
+│   ├── ffmpeg.m3u8      ← live only: ffmpeg's copy, published as index.m3u8
+│   ├── init_<run>_1080p.mp4  ← fMP4 only
 │   ├── seg_<run>_00009.ts
 │   └── seg_<run>_00010.ts
 ├── 720p/ …
@@ -361,10 +394,12 @@ Before each run, `prepareOutputDir` does one of two things:
 - **Live:** keeps the existing playlists, so `append_list` can continue them, but:
   - deletes rendition folders that are no longer in the ladder,
   - deletes leftover `.tmp` files, and
-  - deletes segment files the playlist no longer references.
+  - deletes segments and init sections that neither `ffmpeg.m3u8` nor the published `index.m3u8` references.
 
 The last step is needed because `delete_segments` only cleans up within a single ffmpeg run, so restarts and crashes
-leave stray segments behind.
+leave stray segments behind. Both playlists count because only the published one still lists earlier runs' init
+sections. Output from before live playlists were published only has an `index.m3u8`, written by ffmpeg. It is copied
+to `ffmpeg.m3u8` once, so numbering carries on instead of restarting at 0.
 
 ### Persistence and crash recovery
 
@@ -401,8 +436,9 @@ touched.
 | Location | What it does |
 |---|---|
 | `/hls/` | Serves files from `var/hls`. MIME types: `.m3u8` → `application/vnd.apple.mpegurl`, `.ts` → `video/mp2t`, `.m4s` and `.mp4` → `video/mp4`. |
-| `*.m3u8`, `*.mp4` | `Cache-Control: no-cache`. Live playlists change every few seconds, and fMP4 init files (`init_<n>.mp4`) are rewritten under the same name on every run, so no cache may keep an old copy. |
-| `*.ts`, `*.m4s` | `Cache-Control: max-age=86400`. A segment never changes once written. Its name carries a per-run id (`seg_<run>_<n>`), so a recreated channel or a rebuilt VOD never reuses a URL a player has already cached. |
+| `ffmpeg*.m3u8` | `404`. These are ffmpeg's private live playlists. Players get the published copies. |
+| `*.m3u8` | `Cache-Control: no-cache`. Live playlists change every few seconds, so no cache may keep an old copy. |
+| `*.ts`, `*.m4s`, `*.mp4` | `Cache-Control: max-age=86400`. Segments and init sections never change once written. Their names carry a per-run id (`seg_<run>_<n>`, `init_<run>_<rung>.mp4`), so a restart, a recreated channel or a rebuilt VOD never reuses a URL a player has already cached. |
 | `/` | The test player (`nginx/html/index.html`). |
 | `/api/` | Proxies to the Node API on :3000, so the test page can call it from the same origin. **Localhost only:** HLS is served to the whole network so other devices can play it, but the API can encode any file on disk and pull any URL. |
 

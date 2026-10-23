@@ -35,7 +35,10 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   - The RTMP listener (`-listen 1`) only *warns* on a wrong stream key and accepts the publish, so the
     supervisor kills on that stderr line (`rejectWrongStreamKey`).
   - A listener exits 0 when the publisher disconnects; the supervisor re-arms it.
-  - `-hls_fmp4_init_filename init.mp4` produces `init_<n>.mp4` per variant.
+  - A custom `-hls_fmp4_init_filename` must contain `%v` when there are several variants (it expands to the variant
+    name). With a single variant, `%v` is left as a literal `%v`, so it is only added for several.
+  - ffmpeg's live playlists are wrong after a restart: it never writes `EXT-X-DISCONTINUITY-SEQUENCE`, and with fMP4
+    plus `append_list` one `EXT-X-MAP` (its own run's) covers every segment, earlier runs' included.
 
 ## HLS invariants
 
@@ -45,9 +48,15 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   keep polling while a publisher reconnects. Do **not** add `discont_start` (duplicates the discontinuity tag) or
   `-hls_start_number_source epoch` (with append_list it renumbers already-published segments).
 - `prepareOutputDir` sweeps orphaned segments before each live run; VOD output is wiped and rebuilt.
-- Segment names carry a per-run id (`seg_<runId>_<n>`), so a segment URL never changes content and can be cached
-  for a day. Numbering alone isn't enough: it restarts when a channel is recreated or a VOD rebuilt. fMP4
-  `init_<n>.mp4` keeps its name and is rewritten each run, so it is served `no-cache` like the playlists.
+- Segment and init names carry a per-run id (`seg_<runId>_<n>`, `init_<runId>[_<variant>].mp4`), so a URL never
+  changes content and can be cached for a day. Numbering alone isn't enough: it restarts when a channel is
+  recreated or a VOD rebuilt. The run id also marks run boundaries for the publisher.
+- Live playlists are published. ffmpeg writes `ffmpeg.m3u8`/`ffmpeg-master.m3u8`, and `PlaylistPublisher` rewrites
+  them into `index.m3u8`/`master.m3u8` (logic in `src/hls/playlist.ts`), adding `EXT-X-DISCONTINUITY-SEQUENCE` and a
+  per-run `EXT-X-MAP`. Never serve ffmpeg's copies to players. VOD is a single run, so ffmpeg writes the served
+  names directly.
+- The live sweep keeps anything `ffmpeg.m3u8` or the published `index.m3u8` references: only the published one
+  still lists earlier runs' init sections.
 - nginx must keep the CORS headers and preflight handling (`nginx/cors.conf`, included in every HLS location) and
   `Cache-Control: no-cache` on `.m3u8`. These are what let the hls.js demo page play from localhost.
 - nginx serves HLS on every interface but only proxies `/api/` for localhost: the API can encode any file on disk

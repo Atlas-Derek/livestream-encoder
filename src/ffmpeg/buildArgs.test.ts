@@ -126,6 +126,9 @@ describe('buildArgs', () => {
     );
     assert.equal(args.includes('-hls_playlist_type'), false);
     assert.equal(args.includes('-hls_start_number_source'), false);
+    // Players get the published copies (src/hls/playlist.ts), not ffmpeg's own.
+    assert.equal(valueOf(args, '-master_pl_name'), 'ffmpeg-master.m3u8');
+    assert.equal(args.at(-1), '/hls/ch/%v/ffmpeg.m3u8');
   });
 
   it('drops rungs above a 720p source', () => {
@@ -195,7 +198,13 @@ describe('buildArgs', () => {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
     });
     assert.equal(valueOf(args, '-hls_segment_type'), 'fmp4');
-    assert.equal(valueOf(args, '-hls_fmp4_init_filename'), 'init.mp4');
+    assert.equal(valueOf(args, '-hls_fmp4_init_filename'), 'init_r1_%v.mp4');
+
+    // ffmpeg leaves %v unexpanded with a single variant, which would put a literal "%v" in the URL.
+    const single = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod', segmentType: 'fmp4', passthrough: true }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
+    });
+    assert.equal(valueOf(single.args, '-hls_fmp4_init_filename'), 'init_r1.mp4');
     assert.equal(valueOf(args, '-hls_segment_filename'), '/hls/ch/%v/seg_r1_%05d.m4s');
   });
 

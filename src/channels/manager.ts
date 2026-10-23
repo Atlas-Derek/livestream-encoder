@@ -14,6 +14,7 @@ import {
   type SupervisorStatus,
   type SupervisorTimings,
 } from '../ffmpeg/supervisor.ts';
+import { PlaylistPublisher } from '../hls/publisher.ts';
 import type { Logger } from '../log.ts';
 import { prepareOutputDir, removeOutputDir } from './output.ts';
 import { ChannelSpecSchema, type ChannelSpec, type Rung } from './schema.ts';
@@ -52,7 +53,12 @@ export interface ManagerDeps {
 interface Entry {
   record: ChannelRecord;
   supervisor: Supervisor;
+  /** Live channels only; VOD playlists are served as ffmpeg writes them. */
+  publisher: PlaylistPublisher | null;
 }
+
+/** States in which ffmpeg may be writing playlists, so the publisher keeps polling. */
+const PUBLISHING_STATES = new Set<ChannelState>(['starting', 'waiting_for_publisher', 'running', 'restarting', 'stopping']);
 
 /** ffmpeg only warns about a wrong RTMP stream key and accepts the publish anyway, so enforce it here. */
 export function rejectWrongStreamKey(line: string): string | null {
@@ -123,7 +129,7 @@ export class ChannelManager {
     await (this.#deps.killStale ?? ((dir: string) => killStaleFfmpeg(dir, logger)))(this.#pidDir);
 
     for (const record of await this.#load()) {
-      this.#entries.set(record.spec.id, { record, supervisor: this.#makeSupervisor(record) });
+      this.#entries.set(record.spec.id, this.#makeEntry(record));
       if (record.desired === 'running' && record.completedAt === null) this.#supervisor(record.spec.id).start();
     }
     logger.info({ channels: this.#entries.size }, 'channels loaded');
@@ -140,7 +146,7 @@ export class ChannelManager {
   async create(spec: ChannelSpec): Promise<ChannelStatus> {
     if (this.#entries.has(spec.id)) throw new AppError(`channel "${spec.id}" already exists`, 409);
     const record: ChannelRecord = { spec, port: this.#allocatePort(spec), desired: 'running', completedAt: null };
-    const entry: Entry = { record, supervisor: this.#makeSupervisor(record) };
+    const entry = this.#makeEntry(record);
     this.#entries.set(spec.id, entry);
     await this.#persist();
     entry.supervisor.start();
@@ -160,13 +166,13 @@ export class ChannelManager {
     const entry = this.#entry(id);
     entry.record.desired = 'stopped';
     await this.#persist();
-    await entry.supervisor.stop();
+    await this.#halt(entry);
     return this.#status(entry);
   }
 
   async remove(id: string): Promise<void> {
     const entry = this.#entry(id);
-    await entry.supervisor.stop();
+    await this.#halt(entry); // the publisher's last write must land before the directory goes
     this.#entries.delete(id);
     await this.#persist();
     await removeOutputDir(this.#outDir(id));
@@ -174,8 +180,14 @@ export class ChannelManager {
 
   /** Stops every ffmpeg so playlists are finalized, without changing what should autostart next boot. */
   async shutdown(): Promise<void> {
-    await Promise.all([...this.#entries.values()].map((entry) => entry.supervisor.stop()));
+    await Promise.all([...this.#entries.values()].map((entry) => this.#halt(entry)));
     await Promise.all([this.#writing, ...this.#pidWrites]);
+  }
+
+  /** Stops ffmpeg, then publishes whatever it wrote while finalizing. */
+  async #halt(entry: Entry): Promise<void> {
+    await entry.supervisor.stop();
+    await entry.publisher?.pause();
   }
 
   #entry(id: string): Entry {
@@ -205,7 +217,16 @@ export class ChannelManager {
     throw new AppError(`no free ${type} ports in ${range.start}-${range.end}`, 409);
   }
 
-  #makeSupervisor(record: ChannelRecord): Supervisor {
+  #makeEntry(record: ChannelRecord): Entry {
+    const { spec } = record;
+    const publisher =
+      spec.mode === 'live'
+        ? new PlaylistPublisher({ outDir: this.#outDir(spec.id), channel: spec.id, logger: this.#deps.logger })
+        : null;
+    return { record, publisher, supervisor: this.#makeSupervisor(record, publisher) };
+  }
+
+  #makeSupervisor(record: ChannelRecord, publisher: PlaylistPublisher | null): Supervisor {
     const { spec } = record;
     const listener = spec.input.type === 'rtmp' || spec.input.type === 'srt';
     const rejectPublisher = publisherCheck(spec);
@@ -220,13 +241,17 @@ export class ChannelManager {
       logger: this.#deps.logger,
       ...(this.#deps.spawn ? { spawn: this.#deps.spawn } : {}),
       ...(this.#deps.timings ? { timings: this.#deps.timings } : {}),
-      onStateChange: (state) => this.#onStateChange(record, state),
+      onStateChange: (state) => this.#onStateChange(record, publisher, state),
       onPid: (pid) => this.#onPid(spec.id, pid),
     });
   }
 
-  #onStateChange(record: ChannelRecord, state: ChannelState): void {
+  #onStateChange(record: ChannelRecord, publisher: PlaylistPublisher | null, state: ChannelState): void {
     this.#deps.logger.info({ channel: record.spec.id, state }, 'channel state');
+    if (publisher !== null) {
+      if (PUBLISHING_STATES.has(state)) publisher.resume();
+      else void publisher.pause(); // stop/remove/shutdown await it themselves through #halt
+    }
     if (state !== 'completed') return;
     record.completedAt = new Date().toISOString();
     record.desired = 'stopped';

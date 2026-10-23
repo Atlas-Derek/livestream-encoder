@@ -1,18 +1,21 @@
-import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { copyFile, mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { FFMPEG_MEDIA_PLAYLIST, MEDIA_PLAYLIST, playlistReferences } from '../hls/playlist.ts';
 import type { ChannelSpec } from './schema.ts';
 
 // seg_<runId>_<n>; plain seg_<n> is the naming used before run ids, still swept from existing output.
 const SEGMENT_FILE = /^seg_(?:[a-z0-9]+_)?\d+\.(ts|m4s)$/;
+// fMP4 init sections: init_<runId>_<variant>.mp4, or init_<n>.mp4 from before run ids.
+const INIT_FILE = /^init_[A-Za-z0-9_-]+\.mp4$/;
 
 function isMissing(err: unknown): boolean {
   return err instanceof Error && 'code' in err && err.code === 'ENOENT';
 }
 
-async function readPlaylistEntries(playlistPath: string): Promise<Set<string>> {
+async function readReferences(playlistPath: string): Promise<Set<string>> {
   try {
-    const text = await readFile(playlistPath, 'utf8');
-    return new Set(text.split('\n').map((line) => line.trim()).filter((line) => line !== '' && !line.startsWith('#')));
+    return playlistReferences(await readFile(playlistPath, 'utf8'));
   } catch (err) {
     if (isMissing(err)) return new Set();
     throw err;
@@ -20,19 +23,37 @@ async function readPlaylistEntries(playlistPath: string): Promise<Set<string>> {
 }
 
 /**
- * Removes ffmpeg's leftover temp files and any segment the variant playlist no longer references.
- * delete_segments only cleans up within one ffmpeg run, so restarts and crashes leave orphans behind.
+ * Removes leftover temp files and any segment or init section that neither ffmpeg's playlist nor the published one
+ * references. delete_segments only cleans up within one ffmpeg run, so restarts and crashes leave orphans behind,
+ * and only the published playlist knows which earlier runs' init sections are still needed.
  */
 export async function sweepVariantDir(variantDir: string): Promise<string[]> {
-  const referenced = await readPlaylistEntries(path.join(variantDir, 'index.m3u8'));
+  const referenced = new Set([
+    ...(await readReferences(path.join(variantDir, FFMPEG_MEDIA_PLAYLIST))),
+    ...(await readReferences(path.join(variantDir, MEDIA_PLAYLIST))),
+  ]);
   const removed: string[] = [];
   for (const name of await readdir(variantDir)) {
-    if (name.endsWith('.tmp') || (SEGMENT_FILE.test(name) && !referenced.has(name))) {
+    const media = SEGMENT_FILE.test(name) || INIT_FILE.test(name);
+    if (name.endsWith('.tmp') || (media && !referenced.has(name))) {
       await rm(path.join(variantDir, name), { force: true });
       removed.push(name);
     }
   }
   return removed;
+}
+
+/**
+ * Output written before live playlists were published had ffmpeg write index.m3u8 itself. Seed ffmpeg's playlist
+ * from it so append_list carries on the numbering players have already seen instead of restarting at 0.
+ */
+async function adoptLegacyPlaylist(variantDir: string): Promise<void> {
+  try {
+    await copyFile(path.join(variantDir, MEDIA_PLAYLIST), path.join(variantDir, FFMPEG_MEDIA_PLAYLIST), constants.COPYFILE_EXCL);
+  } catch (err) {
+    if (isMissing(err) || (err instanceof Error && 'code' in err && err.code === 'EEXIST')) return;
+    throw err;
+  }
 }
 
 /**
@@ -54,7 +75,10 @@ export async function prepareOutputDir(outDir: string, variants: string[], mode:
   for (const variant of variants) {
     const variantDir = path.join(outDir, variant);
     await mkdir(variantDir, { recursive: true });
-    if (mode === 'live') await sweepVariantDir(variantDir);
+    if (mode === 'live') {
+      await adoptLegacyPlaylist(variantDir);
+      await sweepVariantDir(variantDir);
+    }
   }
 }
 

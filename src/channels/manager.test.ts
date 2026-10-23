@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -138,6 +139,26 @@ describe('ChannelManager', () => {
     assert.equal(text.includes('hunter2'), false);
     assert.deepEqual(manager.get('cam').spec.input, { type: 'pull', url: 'rtsp://admin:********@cam.local/stream' });
     await manager.shutdown();
+  });
+
+  it('publishes a live channel’s playlists while ffmpeg runs, and stops before its output is deleted', async () => {
+    const file = await sampleFile();
+    const { manager, spawner } = makeManager();
+    await manager.init();
+    await manager.create(spec({ id: 'live', input: { type: 'file', path: file, loop: true } }));
+    await waitFor(() => spawner.calls.length === 1);
+
+    // Stand in for ffmpeg, which the fake spawner doesn't run.
+    const outDir = path.join(config.hlsRoot, 'live');
+    await writeFile(path.join(outDir, '720p', 'ffmpeg.m3u8'), '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4.0,\nseg_r1_00000.ts\n');
+    await writeFile(path.join(outDir, 'ffmpeg-master.m3u8'), '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720p/ffmpeg.m3u8\n');
+    await waitFor(() => existsSync(path.join(outDir, 'master.m3u8')));
+    assert.match(await readFile(path.join(outDir, '720p', 'index.m3u8'), 'utf8'), /DISCONTINUITY-SEQUENCE:0/);
+    assert.match(await readFile(path.join(outDir, 'master.m3u8'), 'utf8'), /720p\/index\.m3u8/);
+
+    await manager.remove('live');
+    await new Promise<void>((resolve) => setTimeout(resolve, 400)); // longer than a publish interval
+    assert.equal(existsSync(outDir), false, 'no publisher write recreates the deleted output');
   });
 
   it('puts a channel with a missing input file into error without spawning', async () => {
