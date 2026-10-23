@@ -120,6 +120,26 @@ describe('ChannelManager', () => {
     await manager.shutdown();
   });
 
+  it('keeps SRT passphrases and URL credentials out of logs and status', async () => {
+    const logged: string[] = [];
+    const record = (obj: object, msg?: string): void => {
+      logged.push(`${msg ?? ''} ${JSON.stringify(obj)}`);
+    };
+    const { manager, spawner } = makeManager({ logger: { debug: record, info: record, warn: record, error: record } });
+    await manager.init();
+    await manager.create(spec({ id: 'srt', input: { type: 'srt', passphrase: 'correct-horse-battery' } }));
+    await manager.create(spec({ id: 'cam', input: { type: 'pull', url: 'rtsp://admin:hunter2@cam.local/stream' } }));
+    await waitFor(() => spawner.calls.length === 2);
+    assert.ok(spawner.calls.flat().some((arg) => arg.includes('passphrase=correct-horse-battery')), 'ffmpeg gets the real secret');
+
+    const text = [...logged, JSON.stringify(manager.list())].join('\n');
+    assert.ok(text.includes('ffmpeg spawned'));
+    assert.equal(text.includes('correct-horse-battery'), false);
+    assert.equal(text.includes('hunter2'), false);
+    assert.deepEqual(manager.get('cam').spec.input, { type: 'pull', url: 'rtsp://admin:********@cam.local/stream' });
+    await manager.shutdown();
+  });
+
   it('puts a channel with a missing input file into error without spawning', async () => {
     const { manager, spawner } = makeManager();
     await manager.init();

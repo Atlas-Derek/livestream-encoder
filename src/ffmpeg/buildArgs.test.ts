@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { ChannelSpecSchema, type Rung } from '../channels/schema.ts';
 import { AppError } from '../errors.ts';
-import { buildArgs, inputArgs, selectRungs, type EncoderConfig } from './buildArgs.ts';
+import { buildArgs, inputArgs, redactSecrets, selectRungs, type EncoderConfig } from './buildArgs.ts';
 import type { ProbeResult } from './probe.ts';
 
 const LADDER: Rung[] = [
@@ -82,7 +82,7 @@ describe('inputArgs', () => {
 describe('buildArgs', () => {
   it('builds a VOD ABR ladder from a probed file', () => {
     const { args, variants } = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod' }), {
-      outDir: '/hls/ch', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
     });
     assert.deepEqual(variants, ['1080p', '720p', '360p']);
     assert.deepEqual(args, [
@@ -99,7 +99,7 @@ describe('buildArgs', () => {
       '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a:0', '128k', '-b:a:1', '128k', '-b:a:2', '96k',
       '-max_muxing_queue_size', '1024',
       '-f', 'hls', '-hls_time', '4', '-hls_segment_type', 'mpegts',
-      '-hls_segment_filename', '/hls/ch/%v/seg_%05d.ts',
+      '-hls_segment_filename', '/hls/ch/%v/seg_r1_%05d.ts',
       '-master_pl_name', 'master.m3u8',
       '-var_stream_map', 'v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:360p',
       '-hls_playlist_type', 'vod', '-hls_list_size', '0', '-hls_flags', 'independent_segments+temp_file',
@@ -109,7 +109,7 @@ describe('buildArgs', () => {
 
   it('uses a rolling, appendable playlist for live output', () => {
     const { args } = buildArgs(spec({ type: 'file', path: '/m/a.mp4', loop: true }), {
-      outDir: '/hls/ch', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
     });
     assert.equal(args[args.indexOf('-i') - 3], '-re');
     assert.equal(valueOf(args, '-hls_list_size'), '6');
@@ -123,7 +123,7 @@ describe('buildArgs', () => {
 
   it('drops rungs above a 720p source', () => {
     const { variants, args } = buildArgs(spec({ type: 'pull', url: 'https://x/live.m3u8' }), {
-      outDir: '/hls/ch', ladder: LADDER, port: null, probe: { ...PROBE_1080, height: 720 }, encoder: ENCODER,
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, height: 720 }, encoder: ENCODER,
     });
     assert.deepEqual(variants, ['720p', '360p']);
     assert.equal(valueOf(args, '-var_stream_map'), 'v:0,a:0,name:720p v:1,a:1,name:360p');
@@ -131,7 +131,7 @@ describe('buildArgs', () => {
 
   it('encodes the full ladder for push inputs and sizes the GOP for up to 60 fps', () => {
     const { variants, args } = buildArgs(spec({ type: 'rtmp', streamKey: 'abc' }), {
-      outDir: '/hls/ch', ladder: LADDER, port: 1935, probe: null, encoder: ENCODER,
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 1935, probe: null, encoder: ENCODER,
     });
     assert.deepEqual(variants, ['1080p', '720p', '360p']);
     assert.equal(valueOf(args, '-g'), '240');
@@ -141,14 +141,14 @@ describe('buildArgs', () => {
 
   it('builds the SRT listener with the full ladder', () => {
     const { args } = buildArgs(spec({ type: 'srt' }), {
-      outDir: '/hls/ch', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
     });
     assert.equal(valueOf(args, '-i'), 'srt://0.0.0.0:9000?mode=listener');
   });
 
   it('leaves audio out when the source has none', () => {
     const { args } = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod' }), {
-      outDir: '/hls/ch', ladder: LADDER, port: null, probe: { ...PROBE_1080, audioCodec: null }, encoder: ENCODER,
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, audioCodec: null }, encoder: ENCODER,
     });
     assert.equal(args.includes('0:a:0'), false);
     assert.equal(args.includes('-c:a'), false);
@@ -157,7 +157,7 @@ describe('buildArgs', () => {
 
   it('copies compatible streams in passthrough mode', () => {
     const { args, variants } = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod', passthrough: true }), {
-      outDir: '/hls/ch', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
     });
     assert.deepEqual(variants, ['source']);
     assert.equal(args.includes('-filter_complex'), false);
@@ -169,7 +169,7 @@ describe('buildArgs', () => {
     assert.throws(
       () =>
         buildArgs(spec({ type: 'file', path: '/m/a.mkv' }, { mode: 'vod', passthrough: true }), {
-          outDir: '/hls/ch', ladder: LADDER, port: null, probe: { ...PROBE_1080, videoCodec: 'vp9' }, encoder: ENCODER,
+          outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, videoCodec: 'vp9' }, encoder: ENCODER,
         }),
       /H\.264 or HEVC/,
     );
@@ -177,20 +177,39 @@ describe('buildArgs', () => {
 
   it('writes fMP4 segments', () => {
     const { args } = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod', segmentType: 'fmp4' }), {
-      outDir: '/hls/ch', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: PROBE_1080, encoder: ENCODER,
     });
     assert.equal(valueOf(args, '-hls_segment_type'), 'fmp4');
     assert.equal(valueOf(args, '-hls_fmp4_init_filename'), 'init.mp4');
-    assert.equal(valueOf(args, '-hls_segment_filename'), '/hls/ch/%v/seg_%05d.m4s');
+    assert.equal(valueOf(args, '-hls_segment_filename'), '/hls/ch/%v/seg_r1_%05d.m4s');
   });
 
   it('switches to VideoToolbox without the x264-only flags', () => {
     const { args } = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod' }), {
-      outDir: '/hls/ch', ladder: LADDER, port: null, probe: PROBE_1080, encoder: { ...ENCODER, videoEncoder: 'h264_videotoolbox' },
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: PROBE_1080, encoder: { ...ENCODER, videoEncoder: 'h264_videotoolbox' },
     });
     assert.equal(valueOf(args, '-c:v'), 'h264_videotoolbox');
     assert.equal(args.includes('-preset'), false);
     assert.equal(args.includes('-sc_threshold'), false);
+  });
+});
+
+describe('redactSecrets', () => {
+  it('masks SRT passphrases and URL credentials', () => {
+    assert.equal(
+      redactSecrets('srt://0.0.0.0:9000?mode=listener&passphrase=correct%20horse&pbkeylen=16'),
+      'srt://0.0.0.0:9000?mode=listener&passphrase=********&pbkeylen=16',
+    );
+    assert.equal(
+      redactSecrets('[rtsp @ 0x1] method DESCRIBE failed: rtsp://admin:hunter2@cam.local:554/stream'),
+      '[rtsp @ 0x1] method DESCRIBE failed: rtsp://admin:********@cam.local:554/stream',
+    );
+  });
+
+  it('leaves URLs without secrets alone', () => {
+    for (const text of ['rtmp://0.0.0.0:1935/live/key', 'https://cdn.example/live.m3u8', 'srt://0.0.0.0:9000?mode=listener']) {
+      assert.equal(redactSecrets(text), text);
+    }
   });
 });
 

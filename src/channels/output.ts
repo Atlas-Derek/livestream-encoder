@@ -2,7 +2,8 @@ import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { ChannelSpec } from './schema.ts';
 
-const SEGMENT_FILE = /^seg_\d+\.(ts|m4s)$/;
+// seg_<runId>_<n>; plain seg_<n> is the naming used before run ids, still swept from existing output.
+const SEGMENT_FILE = /^seg_(?:[a-z0-9]+_)?\d+\.(ts|m4s)$/;
 
 function isMissing(err: unknown): boolean {
   return err instanceof Error && 'code' in err && err.code === 'ENOENT';

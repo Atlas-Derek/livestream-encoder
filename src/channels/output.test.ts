@@ -32,11 +32,12 @@ describe('prepareOutputDir', () => {
   it('keeps referenced live segments and sweeps orphans, temp files and retired variants', async () => {
     const outDir = path.join(root, 'ch');
     const variant = path.join(outDir, '720p');
-    await touch(path.join(variant, 'index.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nseg_00009.ts\n#EXTINF:4.0,\nseg_00010.ts\n');
-    await touch(path.join(variant, 'seg_00003.ts'));
-    await touch(path.join(variant, 'seg_00009.ts'));
-    await touch(path.join(variant, 'seg_00010.ts'));
-    await touch(path.join(variant, 'seg_00011.ts.tmp'));
+    await touch(path.join(variant, 'index.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nseg_r1_00009.ts\n#EXTINF:4.0,\nseg_r2_00010.ts\n');
+    await touch(path.join(variant, 'seg_00002.ts')); // named before run ids existed
+    await touch(path.join(variant, 'seg_r1_00003.ts'));
+    await touch(path.join(variant, 'seg_r1_00009.ts'));
+    await touch(path.join(variant, 'seg_r2_00010.ts'));
+    await touch(path.join(variant, 'seg_r2_00011.ts.tmp'));
     await touch(path.join(variant, 'init_1.mp4'));
     await touch(path.join(outDir, '1440p', 'index.m3u8'));
     await touch(path.join(outDir, 'master.m3u8'));
@@ -44,6 +45,6 @@ describe('prepareOutputDir', () => {
     await prepareOutputDir(outDir, ['720p', '360p'], 'live');
 
     assert.deepEqual((await readdir(outDir)).sort(), ['360p', '720p', 'master.m3u8']);
-    assert.deepEqual((await readdir(variant)).sort(), ['index.m3u8', 'init_1.mp4', 'seg_00009.ts', 'seg_00010.ts']);
+    assert.deepEqual((await readdir(variant)).sort(), ['index.m3u8', 'init_1.mp4', 'seg_r1_00009.ts', 'seg_r2_00010.ts']);
   });
 });

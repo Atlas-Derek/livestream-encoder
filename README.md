@@ -182,7 +182,7 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
   -b:v:0 5000k -maxrate:v:0 5350k -bufsize:v:0 7500k …             # 4. bitrate per rendition
   -c:a aac -ar 48000 -ac 2 -b:a:0 128k …
   -f hls -hls_time 4 -hls_segment_type mpegts                      # 5. cut into 4s segments
-  -hls_segment_filename var/hls/loop/%v/seg_%05d.ts
+  -hls_segment_filename var/hls/loop/%v/seg_<run>_%05d.ts       #    <run> is unique per ffmpeg run
   -master_pl_name master.m3u8
   -var_stream_map "v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p v:3,a:3,name:360p"
   -hls_list_size 6
@@ -258,11 +258,11 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
 #EXT-X-INDEPENDENT-SEGMENTS
 #EXTINF:4.000000,
 #EXT-X-PROGRAM-DATE-TIME:2026-10-20T14:40:22.928-0600
-seg_00009.ts
+seg_mvl0a1b2_00009.ts
 #EXT-X-DISCONTINUITY                            ← publisher reconnected; timestamps restart here
 #EXTINF:4.000000,
 #EXT-X-PROGRAM-DATE-TIME:2026-10-20T14:41:05.112-0600
-seg_00010.ts
+seg_mvl0c3d4_00010.ts                           ← new run id; the numbering continues
 …                                               (no #EXT-X-ENDLIST: the stream is still going)
 ```
 
@@ -276,7 +276,7 @@ The live flags, and what each one is for:
 | `program_date_time` | Stamps each segment with wall-clock time. Players use it to stay in sync across discontinuities. |
 | `independent_segments` | Promises that every segment starts with a keyframe (see keyframe alignment). |
 | `omit_endlist` | Never writes `#EXT-X-ENDLIST`. When a publisher disconnects, players keep polling instead of deciding the stream is over, and pick up again on reconnect. |
-| `append_list` | When ffmpeg restarts, it reads the existing playlist and continues the numbering (`seg_00010` follows `seg_00009`), inserting `#EXT-X-DISCONTINUITY` so the player resets its timestamps. Without it, a restart would start again at `seg_00000` and confuse players that were watching. |
+| `append_list` | When ffmpeg restarts, it reads the existing playlist and continues the numbering (segment 10 follows segment 9), inserting `#EXT-X-DISCONTINUITY` so the player resets its timestamps. Without it, a restart would start again at segment 0 and confuse players that were watching. |
 
 Two other modes:
 - **Passthrough** (`-c copy`): no re-encoding. The source's own video and audio are repackaged as a single rendition
@@ -349,8 +349,8 @@ var/hls/<id>/
 ├── master.m3u8          ← the URL you give a player
 ├── 1080p/
 │   ├── index.m3u8       ← variant playlist
-│   ├── seg_00009.ts
-│   └── seg_00010.ts
+│   ├── seg_<run>_00009.ts
+│   └── seg_<run>_00010.ts
 ├── 720p/ …
 └── 360p/ …
 ```
@@ -400,10 +400,10 @@ touched.
 | Location | What it does |
 |---|---|
 | `/hls/` | Serves files from `var/hls`. MIME types: `.m3u8` → `application/vnd.apple.mpegurl`, `.ts` → `video/mp2t`, `.m4s` and `.mp4` → `video/mp4`. |
-| `*.m3u8` | `Cache-Control: no-cache`. Live playlists change every few seconds, so no cache may keep an old copy. |
-| `*.ts`, `*.m4s` | `Cache-Control: max-age=86400`. A segment never changes once written. |
+| `*.m3u8`, `*.mp4` | `Cache-Control: no-cache`. Live playlists change every few seconds, and fMP4 init files (`init_<n>.mp4`) are rewritten under the same name on every run, so no cache may keep an old copy. |
+| `*.ts`, `*.m4s` | `Cache-Control: max-age=86400`. A segment never changes once written. Its name carries a per-run id (`seg_<run>_<n>`), so a recreated channel or a rebuilt VOD never reuses a URL a player has already cached. |
 | `/` | The test player (`nginx/html/index.html`). |
-| `/api/` | Proxies to the Node API on :3000, so the test page can call it from the same origin. |
+| `/api/` | Proxies to the Node API on :3000, so the test page can call it from the same origin. **Localhost only:** HLS is served to the whole network so other devices can play it, but the API can encode any file on disk and pull any URL. |
 
 **CORS.**
 - The hls.js demo runs at `https://hls-js.netlify.app`, a different origin from `http://localhost:8080`. Browsers

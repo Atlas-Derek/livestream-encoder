@@ -9,6 +9,11 @@ export type EncoderConfig = Pick<Config, 'videoEncoder' | 'x264Preset' | 'segmen
 export interface BuildOptions {
   /** Directory that receives master.m3u8 and one sub-directory per variant. */
   outDir: string;
+  /**
+   * Unique per ffmpeg run and embedded in segment names (seg_<runId>_<n>). Recreating a channel or rebuilding a VOD
+   * restarts numbering, and nginx lets players cache segments for a day, so a segment URL must never be reused.
+   */
+  runId: string;
   ladder: Rung[];
   /** Listener port for rtmp/srt inputs. */
   port: number | null;
@@ -43,6 +48,13 @@ const LIVE_HLS_FLAGS = [
 
 const PASSTHROUGH_VIDEO_CODECS = new Set(['h264', 'hevc']);
 const PASSTHROUGH_AUDIO_CODECS = new Set(['aac', 'mp3', 'ac3', 'eac3']);
+
+/** Masks secrets that ffmpeg args and log lines can carry: SRT passphrases and user:password@ in URLs. */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/passphrase=[^&\s]*/g, 'passphrase=********')
+    .replace(/(\/\/[^:/@\s]+):[^@/\s]*@/g, '$1:********@');
+}
 
 /** Drops rungs taller than the source so nothing is upscaled. */
 export function selectRungs(ladder: Rung[], sourceHeight: number | null): Rung[] {
@@ -135,12 +147,13 @@ function assertPassthroughCompatible(probe: ProbeResult | null): void {
   }
 }
 
-function hlsArgs(spec: ChannelSpec, outDir: string, varStreamMap: string, encoder: EncoderConfig): string[] {
+function hlsArgs(spec: ChannelSpec, outDir: string, runId: string, varStreamMap: string, encoder: EncoderConfig): string[] {
   const ext = spec.segmentType === 'fmp4' ? 'm4s' : 'ts';
   const args = ['-f', 'hls', '-hls_time', String(encoder.segmentSeconds), '-hls_segment_type', spec.segmentType];
   if (spec.segmentType === 'fmp4') args.push('-hls_fmp4_init_filename', 'init.mp4');
   args.push(
-    '-hls_segment_filename', path.join(outDir, '%v', `seg_%05d.${ext}`),
+    // append_list keeps counting across runs, so the run id only changes the name, not the sequence number.
+    '-hls_segment_filename', path.join(outDir, '%v', `seg_${runId}_%05d.${ext}`),
     '-master_pl_name', 'master.m3u8',
     '-var_stream_map', varStreamMap,
   );
@@ -155,7 +168,7 @@ function hlsArgs(spec: ChannelSpec, outDir: string, varStreamMap: string, encode
 
 /** Pure: turns a channel spec into the ffmpeg argument list. Never shell-joined; pass straight to spawn. */
 export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult {
-  const { outDir, ladder, port, probe, encoder } = options;
+  const { outDir, runId, ladder, port, probe, encoder } = options;
   // Push inputs are assumed to carry audio (OBS always does); probed sources tell us.
   const hasAudio = probe === null || probe.audioCodec !== null;
 
@@ -177,6 +190,6 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
   const varStreamMap = variants
     .map((name, i) => (hasAudio ? `v:${i},a:${i},name:${name}` : `v:${i},name:${name}`))
     .join(' ');
-  args.push(...hlsArgs(spec, outDir, varStreamMap, encoder));
+  args.push(...hlsArgs(spec, outDir, runId, varStreamMap, encoder));
   return { args, variants };
 }

@@ -45,8 +45,15 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   keep polling while a publisher reconnects. Do **not** add `discont_start` (duplicates the discontinuity tag) or
   `-hls_start_number_source epoch` (with append_list it renumbers already-published segments).
 - `prepareOutputDir` sweeps orphaned segments before each live run; VOD output is wiped and rebuilt.
+- Segment names carry a per-run id (`seg_<runId>_<n>`), so a segment URL never changes content and can be cached
+  for a day. Numbering alone isn't enough: it restarts when a channel is recreated or a VOD rebuilt. fMP4
+  `init_<n>.mp4` keeps its name and is rewritten each run, so it is served `no-cache` like the playlists.
 - nginx must keep the CORS headers and preflight handling (`nginx/cors.conf`, included in every HLS location) and
   `Cache-Control: no-cache` on `.m3u8`. These are what let the hls.js demo page play from localhost.
+- nginx serves HLS on every interface but only proxies `/api/` for localhost: the API can encode any file on disk
+  and pull any URL.
+- Secrets (SRT passphrases, `user:password@` in URLs) go through `redactSecrets` before reaching logs, `stderrTail`,
+  `lastError` or the status `spec`.
 
 ## Paths
 

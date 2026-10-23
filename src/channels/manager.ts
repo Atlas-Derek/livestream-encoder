@@ -3,7 +3,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
-import { buildArgs } from '../ffmpeg/buildArgs.ts';
+import { buildArgs, redactSecrets } from '../ffmpeg/buildArgs.ts';
 import { killStaleFfmpeg, writePidFile } from '../ffmpeg/pids.ts';
 import { createProbe, type ProbeFn } from '../ffmpeg/probe.ts';
 import {
@@ -69,6 +69,7 @@ function redact(spec: ChannelSpec): ChannelSpec {
   if (spec.input.type === 'srt' && spec.input.passphrase !== undefined) {
     return { ...spec, input: { ...spec.input, passphrase: '********' } };
   }
+  if (spec.input.type === 'pull') return { ...spec, input: { ...spec.input, url: redactSecrets(spec.input.url) } };
   return spec;
 }
 
@@ -190,6 +191,7 @@ export class ChannelManager {
       restart: restartPolicy(spec),
       listener,
       ...(spec.input.type === 'rtmp' ? { rejectPublisher: rejectWrongStreamKey } : {}),
+      redact: redactSecrets,
       logger: this.#deps.logger,
       ...(this.#deps.spawn ? { spawn: this.#deps.spawn } : {}),
       ...(this.#deps.timings ? { timings: this.#deps.timings } : {}),
@@ -244,6 +246,7 @@ export class ChannelManager {
     const outDir = this.#outDir(spec.id);
     const { args, variants } = buildArgs(spec, {
       outDir,
+      runId: Date.now().toString(36),
       ladder: spec.ladder ?? defaultLadder,
       port: record.port,
       probe,

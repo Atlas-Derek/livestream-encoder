@@ -91,6 +91,8 @@ export interface SupervisorOptions {
   listener: boolean;
   /** Returns a reason when a stderr line means the publisher must be dropped (killed and re-armed). */
   rejectPublisher?: (line: string) => string | null;
+  /** Masks secrets (passphrases, URL credentials) in logged args, stderr lines and error messages. */
+  redact?: (text: string) => string;
   logger: Logger;
   spawn?: SpawnFn;
   timings?: Partial<SupervisorTimings>;
@@ -127,6 +129,7 @@ export class Supervisor {
   readonly #opts: SupervisorOptions;
   readonly #timings: SupervisorTimings;
   readonly #spawn: SpawnFn;
+  readonly #redact: (text: string) => string;
 
   #state: ChannelState = 'idle';
   #desired: 'running' | 'stopped' = 'stopped';
@@ -148,6 +151,8 @@ export class Supervisor {
   #lastErrorAt: number | null = null;
   #rejection: string | null = null;
   #stallReason: string | null = null;
+  /** Set by stop() for the child it terminates, so that exit isn't a failure even if start() runs before it. */
+  #stopRequested = false;
 
   #progress: Progress | null = null;
   #progressBlock: Record<string, string> = {};
@@ -160,6 +165,7 @@ export class Supervisor {
     this.#opts = options;
     this.#timings = { ...DEFAULT_TIMINGS, ...options.timings };
     this.#spawn = options.spawn ?? defaultSpawn;
+    this.#redact = options.redact ?? ((text) => text);
   }
 
   get state(): ChannelState {
@@ -186,6 +192,8 @@ export class Supervisor {
     this.#consecutiveFailures = 0;
     this.#lastError = null;
     this.#lastErrorAt = null;
+    // A stop() is still waiting for ffmpeg to exit; #afterExit relaunches then, so two never run at once.
+    if (this.#child !== null) return;
     this.#run();
   }
 
@@ -194,12 +202,14 @@ export class Supervisor {
     this.#generation++;
     this.#clearRestartTimer();
     if (this.#launching !== null) await this.#launching; // it sees the new generation and won't spawn
+    if (this.#desired !== 'stopped') return; // start() was called meanwhile; its run must not be killed
     const child = this.#child;
     if (child === null) {
       if (this.#state !== 'completed' && this.#state !== 'error' && this.#state !== 'idle') this.#setState('stopped');
       return;
     }
     this.#setState('stopping');
+    this.#stopRequested = true;
     const exited = new Promise<void>((resolve) => this.#exitWaiters.push(resolve));
     this.#terminate(child, 'SIGTERM');
     await exited;
@@ -246,7 +256,7 @@ export class Supervisor {
     this.#rejection = null;
     this.#stallReason = null;
     this.#opts.onPid?.(child.pid ?? null);
-    this.#opts.logger.info({ channel: this.#opts.id, ffmpegPid: child.pid, args }, 'ffmpeg spawned');
+    this.#opts.logger.info({ channel: this.#opts.id, ffmpegPid: child.pid, args: args.map(this.#redact) }, 'ffmpeg spawned');
     this.#setState(this.#opts.listener ? 'waiting_for_publisher' : 'starting');
 
     if (child.stdout) readline.createInterface({ input: child.stdout }).on('line', (line) => this.#onProgressLine(line));
@@ -276,14 +286,16 @@ export class Supervisor {
     }
   }
 
-  #onStderrLine(line: string): void {
-    if (line.trim() === '') return;
+  #onStderrLine(raw: string): void {
+    if (raw.trim() === '') return;
+    // ffmpeg echoes input URLs in its errors, and the tail is served by the API.
+    const line = this.#redact(raw);
     this.#stderrTail.push(line);
     if (this.#stderrTail.length > STDERR_TAIL_LINES) this.#stderrTail.shift();
     this.#opts.logger.debug({ channel: this.#opts.id, ffmpeg: line }, 'ffmpeg stderr');
 
     const child = this.#child;
-    const reason = this.#opts.rejectPublisher?.(line) ?? null;
+    const reason = this.#opts.rejectPublisher?.(raw) ?? null;
     if (reason !== null && child !== null && this.#rejection === null) {
       this.#rejection = reason;
       this.#opts.logger.warn({ channel: this.#opts.id, reason }, 'rejecting publisher');
@@ -327,6 +339,8 @@ export class Supervisor {
     this.#killTimer = null;
     this.#stopWatchdog();
     this.#opts.onPid?.(null);
+    const stopRequested = this.#stopRequested;
+    this.#stopRequested = false;
     const ranMs = this.#spawnedAt === null ? 0 : Date.now() - this.#spawnedAt;
     this.#spawnedAt = null;
     this.#runningSince = null;
@@ -335,15 +349,22 @@ export class Supervisor {
     const waiters = this.#exitWaiters;
     this.#exitWaiters = [];
     try {
-      this.#afterExit(code, signal, processError, ranMs);
+      this.#afterExit(code, signal, processError, ranMs, stopRequested);
     } finally {
       for (const resolve of waiters) resolve();
     }
   }
 
-  #afterExit(code: number | null, signal: NodeJS.Signals | null, processError: string | null, ranMs: number): void {
-    if (this.#desired === 'stopped') {
-      this.#setState('stopped');
+  #afterExit(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+    processError: string | null,
+    ranMs: number,
+    stopRequested: boolean,
+  ): void {
+    if (stopRequested || this.#desired === 'stopped') {
+      if (this.#desired === 'running') this.#run(); // start() arrived while stop() waited for this exit
+      else this.#setState('stopped');
       return;
     }
 
@@ -376,7 +397,8 @@ export class Supervisor {
     this.#handleFailure(reason, ranMs);
   }
 
-  #handleFailure(reason: string, ranMs: number): void {
+  #handleFailure(unredacted: string, ranMs: number): void {
+    const reason = this.#redact(unredacted); // prepare errors can quote ffprobe's stderr, URL included
     this.#recordError(reason);
     this.#opts.logger.error({ channel: this.#opts.id, reason }, 'ffmpeg run failed');
     if (this.#opts.restart === 'never' || this.#desired === 'stopped') {

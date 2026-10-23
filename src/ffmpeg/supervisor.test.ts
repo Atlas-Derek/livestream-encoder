@@ -203,6 +203,55 @@ describe('Supervisor', () => {
     assert.equal(spawner.children.length, 1);
   });
 
+  it('relaunches a start() that arrives during stop() only after the old ffmpeg has exited', async () => {
+    const { supervisor, spawner } = makeSupervisor();
+    supervisor.start();
+    await flush();
+    const stopping = supervisor.stop();
+    supervisor.start();
+    await flush();
+    assert.equal(spawner.children.length, 1, 'no second ffmpeg while the first is still exiting');
+    await tick(5_000);
+    assert.deepEqual(spawner.last().signals, ['SIGTERM', 'SIGKILL'], 'the old ffmpeg still gets SIGKILL');
+
+    spawner.last().exit(null, 'SIGKILL');
+    await stopping;
+    await flush();
+    assert.equal(spawner.children.length, 2);
+    assert.equal(supervisor.state, 'starting');
+    assert.equal(supervisor.status().lastError, null, 'the requested stop is not a failure');
+  });
+
+  it('does not kill the new run when start() arrives while stop() waits for prepare', async () => {
+    const releases: Array<() => void> = [];
+    const { supervisor, spawner } = makeSupervisor({
+      prepare: () => new Promise<string[]>((resolve) => releases.push(() => resolve([]))),
+    });
+    supervisor.start();
+    await flush();
+    const stopping = supervisor.stop();
+    supervisor.start();
+    await flush();
+    for (const release of releases) release();
+    await stopping;
+    await flush();
+    assert.equal(spawner.children.length, 1);
+    assert.deepEqual(spawner.last().signals, []);
+    assert.equal(supervisor.state, 'starting');
+  });
+
+  it('redacts secrets from the stderr tail and the last error', async () => {
+    const { supervisor, spawner } = makeSupervisor({ redact: (text) => text.replaceAll('hunter2', '***') });
+    supervisor.start();
+    await flush();
+    spawner.last().stderr.write('Error opening input srt://x?passphrase=hunter2\n');
+    await flush();
+    spawner.last().exit(1);
+    await flush();
+    assert.deepEqual(supervisor.status().stderrTail, ['Error opening input srt://x?passphrase=***']);
+    assert.match(supervisor.status().lastError ?? '', /passphrase=\*\*\*$/);
+  });
+
   it('retries when prepare fails for a live channel and errors for VOD', async () => {
     let attempts = 0;
     const live = makeSupervisor({
