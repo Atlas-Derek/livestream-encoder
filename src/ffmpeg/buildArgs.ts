@@ -142,18 +142,27 @@ function videoEncoderArgs(encoder: EncoderConfig): string[] {
     : ['-c:v', 'h264_videotoolbox', '-profile:v', 'high'];
 }
 
-/** Optional frame-rate cap, then scaling so the short side matches the rung (width for portrait sources). */
-function rungFilter(rung: Rung, portrait: boolean): string {
+/**
+ * Optional frame-rate cap, then scaling so the short side matches the rung (width for portrait sources), then the
+ * optional debug label. Rung names are [A-Za-z0-9_-], so they need no escaping in the filtergraph.
+ */
+function rungFilter(rung: Rung, portrait: boolean, overlay: boolean): string {
   const steps: string[] = [];
   // source_fps is resolved by ffmpeg, so this also works for push sources whose frame rate is unknown here.
   if (rung.maxFps !== undefined) steps.push(`fps=fps=source_fps/ceil(source_fps/${rung.maxFps})`);
-  steps.push(portrait ? `scale=${rung.height}:-2` : `scale=-2:${rung.height}`, 'format=yuv420p');
+  steps.push(portrait ? `scale=${rung.height}:-2` : `scale=-2:${rung.height}`);
+  // Top right, clear of the clock the push scripts draw top left.
+  if (overlay) {
+    steps.push(`drawtext=text='${rung.name}':fontsize=h/14:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=12:x=w-tw-24:y=24`);
+  }
+  steps.push('format=yuv420p');
   return steps.join(',');
 }
 
 function ladderArgs(
   rungs: Rung[],
   portrait: boolean,
+  overlay: boolean,
   hasAudio: boolean,
   probe: ProbeResult | null,
   encoder: EncoderConfig,
@@ -162,10 +171,10 @@ function ladderArgs(
   // Deinterlace once, before the split.
   const filter =
     rungs.length === 1 && only !== undefined
-      ? `[0:v]${DEINTERLACE},${rungFilter(only, portrait)}[v0]`
+      ? `[0:v]${DEINTERLACE},${rungFilter(only, portrait, overlay)}[v0]`
       : [
           `[0:v]${DEINTERLACE},split=${rungs.length}${rungs.map((_, i) => `[s${i}]`).join('')}`,
-          ...rungs.map((rung, i) => `[s${i}]${rungFilter(rung, portrait)}[v${i}]`),
+          ...rungs.map((rung, i) => `[s${i}]${rungFilter(rung, portrait, overlay)}[v${i}]`),
         ].join(';');
 
   const args = ['-filter_complex', filter];
@@ -244,7 +253,7 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
     const portrait = probe?.width != null && probe.height != null && probe.height > probe.width;
     const rungs = selectRungs(ladder, (portrait ? probe?.width : probe?.height) ?? null);
     variants = rungs.map((rung) => rung.name);
-    args.push(...ladderArgs(rungs, portrait, hasAudio, probe, encoder));
+    args.push(...ladderArgs(rungs, portrait, spec.debugOverlay, hasAudio, probe, encoder));
   }
   args.push('-max_muxing_queue_size', '1024');
 

@@ -204,6 +204,15 @@ describe('buildArgs', () => {
     assert.equal(copy.args.includes('-af'), false);
   });
 
+  it('labels each rendition when debugOverlay is set', () => {
+    const { args } = buildArgs(spec({ type: 'srt' }, { debugOverlay: true }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
+    });
+    const filter = valueOf(args, '-filter_complex') ?? '';
+    assert.match(filter, /\[s1\]scale=-2:720,drawtext=text='720p':[^,;]*,format=yuv420p\[v1\]/);
+    assert.equal(ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'srt' }, passthrough: true, debugOverlay: true }).success, false);
+  });
+
   it('leaves audio out of a push channel declared video-only', () => {
     const { args } = buildArgs(spec({ type: 'srt', audio: false }), {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,

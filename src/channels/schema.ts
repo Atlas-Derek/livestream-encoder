@@ -63,6 +63,8 @@ export const ChannelSpecSchema = z
     ladder: LadderSchema.optional(),
     segmentType: z.enum(['mpegts', 'fmp4']).default('mpegts'),
     passthrough: z.boolean().default(false),
+    /** Burns each rendition's name into its picture, so ABR switches are visible in the player. For testing. */
+    debugOverlay: z.boolean().default(false),
   })
   .superRefine((spec, ctx) => {
     if (spec.mode === 'vod' && !(spec.input.type === 'file' && !spec.input.loop)) {
@@ -70,6 +72,9 @@ export const ChannelSpecSchema = z
     }
     if (spec.passthrough && spec.ladder) {
       ctx.addIssue({ code: 'custom', path: ['ladder'], message: 'passthrough produces a single rendition; omit ladder' });
+    }
+    if (spec.passthrough && spec.debugOverlay) {
+      ctx.addIssue({ code: 'custom', path: ['debugOverlay'], message: 'passthrough does not re-encode, so it cannot draw an overlay' });
     }
   });
 export type ChannelSpec = z.infer<typeof ChannelSpecSchema>;

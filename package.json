@@ -14,8 +14,10 @@
     "test": "node --disable-warning=ExperimentalWarning --test --test-timeout=10000 \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "sample": "scripts/make-sample.sh",
+    "test-media": "scripts/make-test-media.sh",
     "push:rtmp": "scripts/push-rtmp.sh",
-    "push:srt": "scripts/push-srt.sh"
+    "push:srt": "scripts/push-srt.sh",
+    "check:hls": "node --disable-warning=ExperimentalWarning src/tools/check-hls.ts"
   },
   "dependencies": {
     "fastify": "^5.12.7",
