@@ -277,13 +277,14 @@ describe('buildArgs', () => {
   });
 
   it('rejects passthrough for codecs HLS cannot carry', () => {
-    assert.throws(
-      () =>
-        buildArgs(spec({ type: 'file', path: '/m/a.mkv' }, { mode: 'vod', passthrough: true }), {
-          outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, videoCodec: 'vp9' }, encoder: ENCODER,
-        }),
-      /H\.264 or HEVC/,
-    );
+    const passthrough = (probe: ProbeResult) => () =>
+      buildArgs(spec({ type: 'file', path: '/m/a.mkv' }, { mode: 'vod', passthrough: true }), {
+        outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe, encoder: ENCODER,
+      });
+    const unprocessable = (pattern: RegExp) => (err: unknown) => err instanceof AppError && err.status === 422 && pattern.test(err.message);
+    assert.throws(passthrough({ ...PROBE_1080, videoCodec: 'vp9' }), unprocessable(/H\.264 or HEVC video, source is vp9/));
+    assert.throws(passthrough({ ...PROBE_1080, videoCodec: null }), unprocessable(/source is missing/));
+    assert.throws(passthrough({ ...PROBE_1080, audioCodec: 'opus' }), unprocessable(/cannot carry opus audio/));
   });
 
   it('writes fMP4 segments', () => {
