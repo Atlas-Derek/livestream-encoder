@@ -109,6 +109,15 @@ describe('routes', () => {
     }
   });
 
+  it('serves metrics in Prometheus\'s text format', async () => {
+    await app.inject({ method: 'POST', url: '/channels', payload: { id: 'live', input: { type: 'srt' } } });
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    assert.equal(res.statusCode, 200);
+    // Prometheus reads text format 0.0.4 by this content type.
+    assert.equal(res.headers['content-type'], 'text/plain; version=0.0.4; charset=utf-8');
+    assert.match(res.body, /^lse_channel_desired_running\{channel="live"\} 1$/m);
+  });
+
   it('starts and stops recording', async () => {
     await app.inject({ method: 'POST', url: '/channels', payload: { id: 'live', input: { type: 'srt' } } });
     const started = await app.inject({ method: 'POST', url: '/channels/live/recording/start' });
