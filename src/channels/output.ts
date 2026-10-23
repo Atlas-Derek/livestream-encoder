@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { copyFile, mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { FFMPEG_MEDIA_PLAYLIST, MEDIA_PLAYLIST, playlistReferences } from '../hls/playlist.ts';
 import type { ChannelSpec } from './schema.ts';
@@ -26,21 +26,34 @@ async function readReferences(playlistPath: string): Promise<Set<string>> {
  * Removes leftover temp files and any segment or init section that neither ffmpeg's playlist nor the published one
  * references. delete_segments only cleans up within one ffmpeg run, so restarts and crashes leave orphans behind,
  * and only the published playlist knows which earlier runs' init sections are still needed.
+ * Unreferenced files modified within retainMs are kept: a player may still hold a playlist listing them
+ * (RFC 8216 6.2.2). The next run's sweep removes them.
  */
-export async function sweepVariantDir(variantDir: string): Promise<string[]> {
+export async function sweepVariantDir(variantDir: string, retainMs = 0, now = Date.now()): Promise<string[]> {
   const referenced = new Set([
     ...(await readReferences(path.join(variantDir, FFMPEG_MEDIA_PLAYLIST))),
     ...(await readReferences(path.join(variantDir, MEDIA_PLAYLIST))),
   ]);
   const removed: string[] = [];
   for (const name of await readdir(variantDir)) {
+    const file = path.join(variantDir, name);
     const media = SEGMENT_FILE.test(name) || INIT_FILE.test(name);
-    if (name.endsWith('.tmp') || (media && !referenced.has(name))) {
-      await rm(path.join(variantDir, name), { force: true });
+    if (name.endsWith('.tmp') || (media && !referenced.has(name) && !(await modifiedWithin(file, retainMs, now)))) {
+      await rm(file, { force: true });
       removed.push(name);
     }
   }
   return removed;
+}
+
+async function modifiedWithin(file: string, ms: number, now: number): Promise<boolean> {
+  if (ms <= 0) return false;
+  try {
+    return now - (await stat(file)).mtimeMs < ms;
+  } catch (err) {
+    if (isMissing(err)) return false;
+    throw err;
+  }
 }
 
 /**
@@ -59,9 +72,14 @@ async function adoptLegacyPlaylist(variantDir: string): Promise<void> {
 /**
  * Gets a channel's output directory ready for an ffmpeg run.
  * VOD starts from scratch. Live keeps the existing playlists so append_list can continue them,
- * but drops variant directories that are no longer in the ladder.
+ * but drops variant directories that are no longer in the ladder. retainMs: see sweepVariantDir.
  */
-export async function prepareOutputDir(outDir: string, variants: string[], mode: ChannelSpec['mode']): Promise<void> {
+export async function prepareOutputDir(
+  outDir: string,
+  variants: string[],
+  mode: ChannelSpec['mode'],
+  retainMs = 0,
+): Promise<void> {
   if (mode === 'vod') await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
 
@@ -77,7 +95,7 @@ export async function prepareOutputDir(outDir: string, variants: string[], mode:
     await mkdir(variantDir, { recursive: true });
     if (mode === 'live') {
       await adoptLegacyPlaylist(variantDir);
-      await sweepVariantDir(variantDir);
+      await sweepVariantDir(variantDir, retainMs);
     }
   }
 }

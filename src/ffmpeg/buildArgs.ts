@@ -62,6 +62,15 @@ const LIVE_HLS_FLAGS = [
   'omit_endlist',
 ].join('+');
 
+/**
+ * Segments to keep on disk after they leave the live playlist. RFC 8216 6.2.2: a removed segment must stay available
+ * for its own duration plus the playlist's, or a player holding an older playlist gets a 404. ffmpeg's default
+ * (hls_delete_threshold 1) keeps one. Verified with ffmpeg 9: a threshold of N keeps exactly N unreferenced segments.
+ */
+export function liveRetainedSegments(liveListSize: number): number {
+  return liveListSize + 1;
+}
+
 const PASSTHROUGH_VIDEO_CODECS = new Set(['h264', 'hevc']);
 const PASSTHROUGH_AUDIO_CODECS = new Set(['aac', 'mp3', 'ac3', 'eac3']);
 
@@ -236,7 +245,11 @@ function hlsArgs(spec: ChannelSpec, outDir: string, runId: string, variants: str
     '-var_stream_map', varStreamMap,
   );
   if (live) {
-    args.push('-hls_list_size', String(encoder.liveListSize), '-hls_flags', LIVE_HLS_FLAGS);
+    args.push(
+      '-hls_list_size', String(encoder.liveListSize),
+      '-hls_delete_threshold', String(liveRetainedSegments(encoder.liveListSize)),
+      '-hls_flags', LIVE_HLS_FLAGS,
+    );
   } else {
     args.push('-hls_playlist_type', 'vod', '-hls_list_size', '0', '-hls_flags', 'independent_segments+temp_file');
   }

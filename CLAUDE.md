@@ -64,6 +64,9 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   keep polling while a publisher reconnects. Do **not** add `discont_start` (duplicates the discontinuity tag) or
   `-hls_start_number_source epoch` (with append_list it renumbers already-published segments).
 - `prepareOutputDir` sweeps orphaned segments before each live run; VOD output is wiped and rebuilt.
+- A segment that leaves the live playlist stays on disk for one segment plus the playlist's duration (RFC 8216
+  6.2.2): `-hls_delete_threshold` is `liveListSize + 1` (ffmpeg's default keeps one), and the sweep keeps
+  unreferenced files younger than that window.
 - Segment and init names carry a per-run id (`seg_<runId>_<n>`, `init_<runId>[_<variant>].mp4`), so a URL never
   changes content and can be cached for a day. Numbering alone isn't enough: it restarts when a channel is
   recreated or a VOD rebuilt. The run id also marks run boundaries for the publisher.

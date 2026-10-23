@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { prepareOutputDir } from './output.ts';
+import { prepareOutputDir, sweepVariantDir } from './output.ts';
 
 let root: string;
 
@@ -76,5 +76,24 @@ describe('prepareOutputDir', () => {
     assert.equal(await readFile(path.join(outDir, '720p', 'ffmpeg.m3u8'), 'utf8'), legacy);
     assert.ok((await readdir(path.join(outDir, '720p'))).includes('seg_00041.ts'));
     assert.equal(await readFile(path.join(outDir, '360p', 'ffmpeg.m3u8'), 'utf8'), 'ffmpeg', 'never overwritten');
+  });
+});
+
+describe('sweepVariantDir', () => {
+  it('keeps unreferenced segments a player may still be fetching, but never temp files', async () => {
+    const variant = path.join(root, 'ch', '720p');
+    await touch(path.join(variant, 'ffmpeg.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nseg_r1_00010.ts\n');
+    await touch(path.join(variant, 'seg_r1_00010.ts'));
+    await touch(path.join(variant, 'seg_r1_00009.ts'));
+    await touch(path.join(variant, 'seg_r1_00008.ts'));
+    await touch(path.join(variant, 'seg_r1_00011.ts.tmp'));
+    const now = Date.now();
+    const old = new Date(now - 60_000);
+    await utimes(path.join(variant, 'seg_r1_00008.ts'), old, old);
+
+    const removed = await sweepVariantDir(variant, 28_000, now);
+
+    assert.deepEqual(removed.sort(), ['seg_r1_00008.ts', 'seg_r1_00011.ts.tmp']);
+    assert.deepEqual((await readdir(variant)).sort(), ['ffmpeg.m3u8', 'seg_r1_00009.ts', 'seg_r1_00010.ts']);
   });
 });

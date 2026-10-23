@@ -147,6 +147,8 @@ describe('buildArgs', () => {
     });
     assert.equal(args[args.indexOf('-i') - 3], '-re');
     assert.equal(valueOf(args, '-hls_list_size'), '6');
+    // Removed segments stay for one segment plus the playlist's duration (RFC 8216 6.2.2).
+    assert.equal(valueOf(args, '-hls_delete_threshold'), '7');
     assert.equal(
       valueOf(args, '-hls_flags'),
       'delete_segments+independent_segments+temp_file+program_date_time+append_list+omit_endlist',

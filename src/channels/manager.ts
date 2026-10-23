@@ -3,7 +3,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
-import { buildArgs, redactSecrets } from '../ffmpeg/buildArgs.ts';
+import { buildArgs, liveRetainedSegments, redactSecrets } from '../ffmpeg/buildArgs.ts';
 import { killStaleFfmpeg, writePidFile } from '../ffmpeg/pids.ts';
 import { createProbe, createSegmentStreamProbe, type ProbeFn } from '../ffmpeg/probe.ts';
 import { fillMissingCodecs, type ProbeSegmentStreams } from '../hls/codecs.ts';
@@ -340,7 +340,9 @@ export class ChannelManager {
       probe,
       encoder: config,
     });
-    await prepareOutputDir(outDir, variants, spec.mode);
+    // Segments the last run left behind stay as long as ffmpeg would have kept them.
+    const retainMs = liveRetainedSegments(config.liveListSize) * config.segmentSeconds * 1000;
+    await prepareOutputDir(outDir, variants, spec.mode, retainMs);
     return args;
   }
 
