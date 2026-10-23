@@ -267,23 +267,6 @@ describe('ChannelManager', () => {
     assert.match(manager.get('srt').lastError ?? '', /"audio": false/);
   });
 
-  it('re-encodes a completed VOD channel on start', async () => {
-    const file = await sampleFile();
-    const { manager, spawner } = makeManager();
-    await manager.init();
-    await manager.create(spec({ id: 'vod', input: { type: 'file', path: file }, mode: 'vod' }));
-    await waitFor(() => spawner.calls.length === 1);
-    spawner.last().progress(4);
-    await waitFor(() => manager.get('vod').state === 'running');
-    spawner.last().exit(0);
-    await waitFor(() => manager.get('vod').state === 'completed');
-
-    const status = await manager.start('vod');
-    assert.equal(status.completedAt, null);
-    assert.equal(status.desired, 'running');
-    await waitFor(() => spawner.calls.length === 2);
-  });
-
   it('adds the CODECS ffmpeg left out of a VOD master once the encode completes, then serves it', async () => {
     const file = await sampleFile();
     const probed: string[] = [];
@@ -313,7 +296,7 @@ describe('ChannelManager', () => {
     assert.equal(existsSync(staging), false);
   });
 
-  it('keeps serving the previous VOD while it is rebuilt, and keeps it when the rebuild fails', async () => {
+  it('re-encodes a completed VOD on start, serving the previous one meanwhile and keeping it if the rebuild fails', async () => {
     const file = await sampleFile();
     const { manager, spawner } = makeManager();
     await manager.init();
@@ -334,7 +317,8 @@ describe('ChannelManager', () => {
     await waitFor(() => existsSync(served));
     assert.equal(await readFile(served, 'utf8'), '#EXTM3U\n# first\n');
 
-    await manager.start('vod');
+    const restarted = await manager.start('vod');
+    assert.deepEqual([restarted.completedAt, restarted.desired], [null, 'running'], 're-encoded on the next boot too');
     await waitFor(() => spawner.children.length === 2);
     assert.equal(await readFile(served, 'utf8'), '#EXTM3U\n# first\n', 'still served while rebuilding');
     await encode('#EXTM3U\n# broken\n', 1, 'error');
