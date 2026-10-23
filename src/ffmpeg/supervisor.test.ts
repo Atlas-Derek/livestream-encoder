@@ -108,6 +108,36 @@ describe('Supervisor', () => {
     assert.equal(spawner.children.length, 4);
   });
 
+  it('caps the backoff at maxBackoffMs', async () => {
+    const { supervisor, spawner } = makeSupervisor({ timings: { maxBackoffMs: 3_000 } });
+    supervisor.start();
+    await flush();
+    for (const delay of [1_000, 2_000, 3_000, 3_000]) {
+      const before = spawner.children.length;
+      spawner.last().exit(1);
+      await tick(delay - 1);
+      assert.equal(spawner.children.length, before, `no restart before ${delay}ms`);
+      await tick(1);
+      assert.equal(spawner.children.length, before + 1, `restart after ${delay}ms`);
+    }
+  });
+
+  it('restarts with backoff when an always-on source exits cleanly', async () => {
+    // A pull source whose upstream ended, or a looping file ffmpeg gave up on.
+    const { supervisor, spawner } = makeSupervisor({ restart: 'always' });
+    supervisor.start();
+    await flush();
+    spawner.last().progress(4);
+    await tick(5_000);
+    spawner.last().exit(0);
+    await flush();
+    assert.equal(supervisor.state, 'restarting');
+    await tick(999);
+    assert.equal(spawner.children.length, 1);
+    await tick(1);
+    assert.equal(spawner.children.length, 2);
+  });
+
   it('completes on a clean exit, without restarting, for VOD and non-looping live files', async () => {
     for (const restart of ['never', 'on-failure'] as const) {
       const { supervisor, spawner } = makeSupervisor({ restart });
@@ -168,6 +198,52 @@ describe('Supervisor', () => {
     await flush();
     assert.match(supervisor.status().lastError ?? '', /^stalled: no output progress/);
     await tick(1_000);
+    assert.equal(spawner.children.length, 2);
+  });
+
+  it('kills an ffmpeg that keeps reporting progress while out_time stays put', async () => {
+    // How the per-output aresample freeze looked: progress blocks kept coming, out_time never moved.
+    const { supervisor, spawner } = makeSupervisor({ timings: { stallTimeoutMs: 15_000 } });
+    supervisor.start();
+    await flush();
+    for (let i = 0; i < 14; i++) {
+      spawner.last().progress(7);
+      await tick(1_000);
+    }
+    assert.deepEqual(spawner.last().signals, []);
+    spawner.last().progress(7);
+    await tick(1_000);
+    assert.deepEqual(spawner.last().signals, ['SIGTERM']);
+    assert.equal(supervisor.state, 'running');
+  });
+
+  it('reports a process error, such as a missing ffmpeg binary, and retries', async () => {
+    const { supervisor, spawner } = makeSupervisor();
+    supervisor.start();
+    await flush();
+    spawner.last().emit('error', Object.assign(new Error('spawn /opt/ffmpeg ENOENT'), { code: 'ENOENT' }));
+    spawner.last().exit(-2); // Node may follow 'error' with 'close'; it must count once
+    await flush();
+    assert.equal(supervisor.state, 'restarting');
+    assert.equal(supervisor.status().lastError, 'ffmpeg process error: spawn /opt/ffmpeg ENOENT');
+    assert.equal(supervisor.status().restarts, 1);
+    await tick(1_000);
+    assert.equal(spawner.children.length, 2);
+  });
+
+  it('treats a listener that exits cleanly at once as a failure, not a publisher leaving', async () => {
+    // Re-arming immediately would spin; this one backs off.
+    const { supervisor, spawner } = makeSupervisor({ listener: true });
+    supervisor.start();
+    await flush();
+    await tick(500);
+    spawner.last().exit(0);
+    await flush();
+    assert.equal(supervisor.state, 'restarting');
+    assert.equal(supervisor.status().lastError, 'ffmpeg exited before producing output');
+    await tick(999);
+    assert.equal(spawner.children.length, 1);
+    await tick(1);
     assert.equal(spawner.children.length, 2);
   });
 
