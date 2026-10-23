@@ -93,8 +93,11 @@ export interface SupervisorStatus {
    * run has that much history. ffmpeg's own speed is an average since it started, so it hides a recent slowdown.
    */
   realtimeFactor: number | null;
-  /** Set while a real-time channel falls behind: it still runs, but players will rebuffer and latency grows. */
-  warning: string | null;
+  /**
+   * Problems that don't stop the channel, such as a real-time channel falling behind: it still runs, but players
+   * rebuffer and latency grows. Empty when there are none.
+   */
+  warnings: string[];
   stderrTail: string[];
 }
 
@@ -180,7 +183,8 @@ export class Supervisor {
   /** (wall ms, out_time) pairs covering the last realtimeWindowMs, oldest first. */
   #samples: Array<{ at: number; outTime: number }> = [];
   #realtimeFactor: number | null = null;
-  #warning: string | null = null;
+  /** The falling-behind warning while it lasts. */
+  #fallingBehind: string | null = null;
   #stderrTail: string[] = [];
   #exitWaiters: Array<() => void> = [];
 
@@ -206,7 +210,7 @@ export class Supervisor {
       lastErrorAt: this.#lastErrorAt === null ? null : new Date(this.#lastErrorAt).toISOString(),
       progress: this.#progress,
       realtimeFactor: this.#realtimeFactor === null ? null : Math.round(this.#realtimeFactor * 1000) / 1000,
-      warning: this.#warning,
+      warnings: this.#fallingBehind === null ? [] : [this.#fallingBehind],
       stderrTail: [...this.#stderrTail],
     };
   }
@@ -324,17 +328,17 @@ export class Supervisor {
     const factor = (outTime - oldest.outTime) / ((now - oldest.at) / 1000);
     this.#realtimeFactor = factor;
 
-    const behind = this.#warning === null ? factor < FALLING_BEHIND_BELOW : factor < RECOVERED_AT;
+    const behind = this.#fallingBehind === null ? factor < FALLING_BEHIND_BELOW : factor < RECOVERED_AT;
     if (behind) {
-      if (this.#warning === null) {
+      if (this.#fallingBehind === null) {
         this.#opts.logger.warn({ channel: this.#opts.id, realtimeFactor: factor }, 'falling behind real time');
       }
       // Kept current while it lasts.
-      this.#warning =
+      this.#fallingBehind =
         `falling behind: output at ${factor.toFixed(2)}x real time over the last ${Math.round(windowMs / 1000)}s ` +
         '(the encoder is too slow for the ladder, or the input is arriving late)';
-    } else if (this.#warning !== null) {
-      this.#warning = null;
+    } else if (this.#fallingBehind !== null) {
+      this.#fallingBehind = null;
       this.#opts.logger.info({ channel: this.#opts.id, realtimeFactor: factor }, 'caught up with real time');
     }
   }
@@ -342,7 +346,7 @@ export class Supervisor {
   #resetRealtime(): void {
     this.#samples = [];
     this.#realtimeFactor = null;
-    this.#warning = null;
+    this.#fallingBehind = null;
   }
 
   #onStderrLine(raw: string): void {

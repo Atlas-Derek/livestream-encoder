@@ -50,6 +50,33 @@ describe('PlaylistPublisher', () => {
     assert.match(await read('720p', 'index.m3u8'), /seg_r1_00010\.ts/);
   });
 
+  it('warns about segments much longer than hls_time, with advice for passthrough, and logs it once per run', async () => {
+    const warned: unknown[] = [];
+    const logger: Logger = { ...silentLogger, warn: (obj: unknown) => void warned.push(obj) };
+    const variant = (seconds: string[]) =>
+      `#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n${seconds.map((s, i) => `#EXTINF:${s},\nseg_r1_0000${i}.ts\n`).join('')}`;
+    const publisher = new PlaylistPublisher({ outDir, channel: 'ch', logger, segmentSeconds: 4, passthrough: true });
+
+    await writeFfmpegOutput(variant(['4.000000', '4.966667']));
+    await publisher.sync();
+    assert.deepEqual(publisher.warnings(), [], 'within 1.25x');
+
+    await writeFfmpegOutput(variant(['4.000000', '4.966667', '8.333333']));
+    await publisher.sync();
+    const [warning] = publisher.warnings();
+    assert.match(warning ?? '', /^segments are up to 8\.3s long instead of 4s, which adds latency: passthrough can only cut/);
+    assert.match(warning ?? '', /keyframe interval to 4s/);
+
+    await writeFfmpegOutput(variant(['4.000000', '4.966667', '8.333333', '8.333333']));
+    await publisher.sync();
+    assert.equal(warned.length, 1, 'logged once per run');
+
+    const encoded = new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger, segmentSeconds: 4 });
+    await encoded.sync();
+    assert.doesNotMatch(encoded.warnings()[0] ?? '', /passthrough/);
+    assert.deepEqual(new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger }).warnings(), []);
+  });
+
   it('polls while resumed and publishes once more when paused', async () => {
     const publisher = new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger, intervalMs: 10 });
     publisher.resume();

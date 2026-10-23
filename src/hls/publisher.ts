@@ -7,12 +7,19 @@ import {
   FFMPEG_MEDIA_PLAYLIST,
   MASTER_PLAYLIST,
   MEDIA_PLAYLIST,
+  longestSegmentOfLastRun,
   orderVariants,
   publishMasterPlaylist,
   publishMediaPlaylist,
 } from './playlist.ts';
 
 export const DEFAULT_PUBLISH_INTERVAL_MS = 250;
+
+/**
+ * Segments longer than this many times hls_time get a warning. ffmpeg cuts at the first keyframe at or after hls_time,
+ * so an encoded ladder (forced keyframes) stays within a frame of it; longer means sparse source keyframes.
+ */
+const LONG_SEGMENT_RATIO = 1.25;
 
 export interface PublisherOptions {
   outDir: string;
@@ -21,6 +28,10 @@ export interface PublisherOptions {
   intervalMs?: number;
   /** Reads a segment's streams, to add the CODECS (HEVC) and FRAME-RATE ffmpeg leaves out. */
   probeStreams?: ProbeSegmentStreams;
+  /** hls_time: segments much longer than this are reported by warnings(). */
+  segmentSeconds?: number;
+  /** Passthrough copies the source, so segments can only be cut at its keyframes; the warning says what to change. */
+  passthrough?: boolean;
 }
 
 function isMissing(err: unknown): boolean {
@@ -55,6 +66,10 @@ export class PlaylistPublisher {
   /** The ffmpeg playlist text last published from each source file, to skip unchanged ones. */
   readonly #published = new Map<string, string>();
   #lastError: string | null = null;
+  /** The newest run's longest segment, per variant directory. */
+  readonly #longest = new Map<string, { runId: string; seconds: number }>();
+  /** The run whose long segments have been logged, to log them once. */
+  #loggedLongRun: string | null = null;
 
   constructor(options: PublisherOptions) {
     this.#opts = options;
@@ -71,6 +86,18 @@ export class PlaylistPublisher {
     this.#timer = null;
     if (this.#syncing !== null) await this.#syncing;
     await this.sync();
+  }
+
+  /** Problems seen in the published playlists: segments much longer than hls_time, which add latency. */
+  warnings(): string[] {
+    const target = this.#opts.segmentSeconds;
+    const longest = Math.max(0, ...[...this.#longest.values()].map((l) => l.seconds));
+    if (target === undefined || longest <= target * LONG_SEGMENT_RATIO) return [];
+    const advice = this.#opts.passthrough
+      ? `: passthrough can only cut at the source's keyframes. Set the source encoder's keyframe interval to ${target}s ` +
+        'or a divisor of it (in OBS: Settings > Output > Keyframe Interval), or encode a ladder instead of passthrough'
+      : '';
+    return [`segments are up to ${longest.toFixed(1)}s long instead of ${target}s, which adds latency${advice}`];
   }
 
   /** One pass over the output directory. Joins a pass already in flight. Never rejects; failures are logged. */
@@ -107,7 +134,9 @@ export class PlaylistPublisher {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const dir = path.join(outDir, entry.name);
-      await this.#publish(path.join(dir, FFMPEG_MEDIA_PLAYLIST), path.join(dir, MEDIA_PLAYLIST), publishMediaPlaylist);
+      const from = path.join(dir, FFMPEG_MEDIA_PLAYLIST);
+      const source = await this.#publish(from, path.join(dir, MEDIA_PLAYLIST), publishMediaPlaylist);
+      if (source !== null) this.#trackSegmentLength(entry.name, source);
     }
     await this.#publishMaster();
   }
@@ -134,10 +163,27 @@ export class PlaylistPublisher {
     if (complete) this.#published.set(from, source);
   }
 
-  async #publish(from: string, to: string, transform: (source: string, previous: string | null) => string): Promise<void> {
+  /** Returns the source it published, or null if there was nothing new. */
+  async #publish(
+    from: string,
+    to: string,
+    transform: (source: string, previous: string | null) => string,
+  ): Promise<string | null> {
     const source = await readIfExists(from);
-    if (source === null || this.#published.get(from) === source) return;
+    if (source === null || this.#published.get(from) === source) return null;
     await writeAtomic(to, transform(source, await readIfExists(to)));
     this.#published.set(from, source);
+    return source;
+  }
+
+  #trackSegmentLength(variant: string, source: string): void {
+    const longest = longestSegmentOfLastRun(source);
+    if (longest === null) return;
+    this.#longest.set(variant, longest);
+    const [warning] = this.warnings();
+    if (warning !== undefined && this.#loggedLongRun !== longest.runId) {
+      this.#loggedLongRun = longest.runId;
+      this.#opts.logger.warn({ channel: this.#opts.channel, warning }, 'segments longer than hls_time');
+    }
   }
 }

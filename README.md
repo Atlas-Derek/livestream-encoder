@@ -175,7 +175,8 @@ Live sources besides OBS:
 | Push SRT without the channel's passphrase | the connection is refused; the channel keeps waiting |
 | Push video only to a channel without `"audio": false` | `lastError` says to set `"audio": false` |
 | `kill -STOP <pid of the pushing ffmpeg>` for 20s, then `kill -CONT` | `stalled: no output progress for 15s` and a restart |
-| Start a live channel from `media/test/1080p60.mp4` with `X264_PRESET=placebo` | after 30s, `warning: falling behind: output at 0.33x real time …` while the state stays `running` |
+| Start a live channel from `media/test/1080p60.mp4` with `X264_PRESET=placebo` | after 30s, `warnings: ["falling behind: output at 0.33x real time …"]` while the state stays `running` |
+| Push to a `"passthrough": true` channel with a keyframe every 250 frames (`-g 250`, like OBS's "auto") | `warnings: ["segments are up to 8.3s long instead of 4s …"]`, gone once the publisher leaves |
 | `kill -9` the API, then start it again | the old ffmpeg is killed (`killed stale ffmpeg`) and channels come back |
 | Throttle the network in Chrome DevTools, or Safari/iOS with Network Link Conditioner | lower renditions in the event log, no stalls once it settles |
 | Create one more RTMP channel than `RTMP_PORTS` allows | `409 no free rtmp ports` |
@@ -420,6 +421,10 @@ Two other modes:
     VOD ones when the encode completes. Nothing is added when a codec isn't recognised.
   - **fMP4 from MPEG-TS, SRT or RTMP** gets `-bsf:a aac_adtstoasc`. Their AAC is ADTS, which fMP4 can't carry, and
     ffmpeg's HLS muxer doesn't add the filter itself.
+  - **Segment length follows the source's keyframes.** With OBS's "Keyframe Interval: 0 (auto)" they are about 8s
+    apart, so segments are too, and latency roughly doubles. While a live channel runs, segments longer than 1.25×
+    `SEGMENT_SECONDS` add an entry to `warnings` (logged once per run) saying what to change: set the publisher's
+    keyframe interval to `SEGMENT_SECONDS` or a divisor of it.
   - **Push sources** carry no bitrate when copied, so the top rung's bitrate is declared as the `BANDWIDTH` estimate.
     Without it, ffmpeg advertised 79 kbps for a 2.6 Mbps stream.
   - **HEVC from a push publisher** keeps `hev1`: its codec isn't known until it connects, and the tag can't be forced
@@ -473,7 +478,7 @@ Each channel has one `Supervisor`, which runs this state machine:
     started, so it hides a recent slowdown.
 - **Keeping up.** On live channels, `realtimeFactor` is how many seconds of output were produced per second over the
   last 30s (`null` until a run has 30s of history). A healthy channel reads 0.997–1.005.
-  - Below 0.97, `warning` says the channel is falling behind, and it is logged once. The channel keeps running, but
+  - Below 0.97, `warnings` says the channel is falling behind, and it is logged once. The channel keeps running, but
     segments arrive late: players rebuffer and latency grows.
   - Causes: the ladder is too heavy for the CPU (try `VIDEO_ENCODER=h264_videotoolbox`, a faster `X264_PRESET` or
     fewer rungs), or a push or pull source is delivering slower than real time.

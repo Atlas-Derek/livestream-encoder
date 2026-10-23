@@ -201,6 +201,24 @@ export function orderVariants(master: string): string {
   return [...lines.slice(0, firstVariant), ...ordered.map((v) => `${v.inf}\n${v.uri}\n`)].join('\n');
 }
 
+/**
+ * The longest segment (EXTINF) of the newest run in a media playlist, so earlier runs, which may have come from
+ * another publisher, don't count. null without segments.
+ */
+export function longestSegmentOfLastRun(text: string): { runId: string; seconds: number } | null {
+  const { segments } = parseMediaPlaylist(text);
+  const runId = segments.at(-1)?.runId;
+  if (runId === undefined) return null;
+  let seconds = 0;
+  for (const segment of segments) {
+    if (segment.runId !== runId) continue;
+    const extinf = segment.tags.find((tag) => tag.startsWith('#EXTINF:'));
+    const duration = extinf === undefined ? Number.NaN : Number.parseFloat(extinf.slice('#EXTINF:'.length));
+    if (Number.isFinite(duration)) seconds = Math.max(seconds, duration);
+  }
+  return { runId, seconds };
+}
+
 /** Files a media playlist refers to: its segments and init sections. */
 export function playlistReferences(text: string): Set<string> {
   const refs = new Set<string>();

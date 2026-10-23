@@ -235,6 +235,8 @@ export class ChannelManager {
             channel: spec.id,
             logger: this.#deps.logger,
             probeStreams: this.#probeStreams,
+            segmentSeconds: this.#deps.config.segmentSeconds,
+            passthrough: spec.passthrough,
           })
         : null;
     return { record, publisher, supervisor: this.#makeSupervisor(record, publisher) };
@@ -352,12 +354,13 @@ export class ChannelManager {
   }
 
   #status(entry: Entry): ChannelStatus {
-    const { record, supervisor } = entry;
+    const { record, supervisor, publisher } = entry;
     const { spec, port } = record;
     const { ingestHost, publicHlsBaseUrl } = this.#deps.config;
     let ingestUrl: string | null = null;
     if (spec.input.type === 'rtmp') ingestUrl = `rtmp://${ingestHost}:${port}/live/${spec.input.streamKey}`;
     if (spec.input.type === 'srt') ingestUrl = `srt://${ingestHost}:${port}?mode=caller`;
+    const status = supervisor.status();
     return {
       id: spec.id,
       spec: redact(spec),
@@ -366,7 +369,9 @@ export class ChannelManager {
       completedAt: record.completedAt,
       ingestUrl,
       playbackUrl: `${publicHlsBaseUrl}/${spec.id}/master.m3u8`,
-      ...supervisor.status(),
+      ...status,
+      // The publisher remembers the last run's segments, which only matter while it runs.
+      warnings: [...status.warnings, ...(status.state === 'running' ? (publisher?.warnings() ?? []) : [])],
     };
   }
 

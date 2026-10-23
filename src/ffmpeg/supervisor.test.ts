@@ -224,18 +224,18 @@ describe('Supervisor', () => {
     assert.equal(supervisor.status().realtimeFactor, null, 'not enough history yet');
     await run(15, 1);
     assert.equal(supervisor.status().realtimeFactor, 1);
-    assert.equal(supervisor.status().warning, null);
+    assert.deepEqual(supervisor.status().warnings, []);
 
     await run(30, 0.8);
     assert.equal(supervisor.status().realtimeFactor, 0.8);
-    assert.match(supervisor.status().warning ?? '', /^falling behind: output at 0\.80x real time over the last 30s/);
+    assert.match(supervisor.status().warnings.join('\n'), /^falling behind: output at 0\.80x real time over the last 30s/);
     assert.equal(supervisor.state, 'running', 'still running');
     assert.equal(supervisor.status().lastError, null, 'not a failure');
 
     await run(10, 1);
-    assert.notEqual(supervisor.status().warning, null, 'below 0.99 over the window, so not recovered yet');
+    assert.equal(supervisor.status().warnings.length, 1, 'below 0.99 over the window, so not recovered yet');
     await run(30, 1);
-    assert.equal(supervisor.status().warning, null);
+    assert.deepEqual(supervisor.status().warnings, []);
   });
 
   it('starts each run with fresh real-time history, and ignores speed on non-real-time channels', async () => {
@@ -247,10 +247,10 @@ describe('Supervisor', () => {
       spawner.last().progress(t * 0.5);
       await flush();
     }
-    assert.notEqual(supervisor.status().warning, null);
+    assert.equal(supervisor.status().warnings.length, 1);
     spawner.last().exit(1);
     await tick(0);
-    assert.equal(supervisor.status().warning, null);
+    assert.deepEqual(supervisor.status().warnings, []);
     assert.equal(supervisor.status().realtimeFactor, null);
 
     const vod = makeSupervisor({ restart: 'never' });
@@ -262,7 +262,7 @@ describe('Supervisor', () => {
       await flush();
     }
     assert.equal(vod.supervisor.status().realtimeFactor, null);
-    assert.equal(vod.supervisor.status().warning, null);
+    assert.deepEqual(vod.supervisor.status().warnings, []);
   });
 
   it('kills an ffmpeg that keeps reporting progress while out_time stays put', async () => {

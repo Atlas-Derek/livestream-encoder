@@ -209,7 +209,7 @@
         button.querySelector('.detail').textContent = `${c.spec.input.type} · ${c.spec.mode}${fps}`;
         button.querySelector('.ingest').textContent = c.ingestUrl ? `ingest: ${c.ingestUrl}` : '';
         button.querySelector('.err').textContent =
-          c.warning ?? (c.lastError && c.state !== 'running' ? `last error: ${c.lastError}` : '');
+          c.warnings.length > 0 ? c.warnings.join(' · ') : c.lastError && c.state !== 'running' ? `last error: ${c.lastError}` : '';
         button.addEventListener('click', () => play(c));
         li.append(button);
         return li;

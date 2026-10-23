@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  longestSegmentOfLastRun,
   orderVariants,
   parseMediaPlaylist,
   playlistReferences,
@@ -151,5 +152,17 @@ describe('orderVariants', () => {
     const noBandwidth = master(['#EXT-X-STREAM-INF:RESOLUTION=x', 'a/index.m3u8'], variant(900_000, '360p'));
     assert.equal(orderVariants(noBandwidth), noBandwidth);
     assert.equal(orderVariants('#EXTM3U\n'), '#EXTM3U\n');
+  });
+});
+
+describe('longestSegmentOfLastRun', () => {
+  it('measures only the newest run', () => {
+    const text = playlist([
+      ...HEADER,
+      '#EXTINF:12.000000,', 'seg_r1_00007.ts',
+      '#EXT-X-DISCONTINUITY', '#EXTINF:8.341667,', 'seg_r2_00008.ts', '#EXTINF:4.004000,', 'seg_r2_00009.ts',
+    ]);
+    assert.deepEqual(longestSegmentOfLastRun(text), { runId: 'r2', seconds: 8.341667 });
+    assert.equal(longestSegmentOfLastRun(playlist(HEADER)), null);
   });
 });
