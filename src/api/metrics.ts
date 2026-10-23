@@ -66,7 +66,7 @@ export function formatMetrics(channels: ChannelStatus[]): string {
     perChannel('lse_channel_uptime_seconds', 'Seconds since the current run started producing output.', 'gauge',
       channels, (c) => c.uptimeSec),
     perChannel('lse_channel_realtime_factor',
-      'Live channels: output seconds per wall-clock second over the last 30s. Below 0.97 it is falling behind.', 'gauge',
+      'Live channels: output seconds per wall-clock second over the last 2 minutes. Below 0.97 it is falling behind.', 'gauge',
       channels, (c) => c.realtimeFactor),
     perChannel('lse_channel_fps', 'Frames per second ffmpeg is encoding.', 'gauge', channels, (c) => c.progress?.fps ?? null),
     perChannel('lse_channel_warnings', 'Problems that do not stop the channel (see GET /channels/:id).', 'gauge',

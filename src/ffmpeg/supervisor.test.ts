@@ -206,7 +206,7 @@ describe('Supervisor', () => {
   });
 
   it('warns while a real-time channel falls behind, and clears the warning once it catches up', async () => {
-    const { supervisor, spawner } = makeSupervisor({ realtime: true });
+    const { supervisor, spawner } = makeSupervisor({ realtime: true, timings: { realtimeWindowMs: 60_000 } });
     supervisor.start();
     await flush();
     let outTime = 0;
@@ -220,26 +220,47 @@ describe('Supervisor', () => {
       }
     };
 
-    await run(20, 1);
+    await run(50, 1);
     assert.equal(supervisor.status().realtimeFactor, null, 'not enough history yet');
     await run(15, 1);
     assert.equal(supervisor.status().realtimeFactor, 1);
     assert.deepEqual(supervisor.status().warnings, []);
 
-    await run(30, 0.8);
+    await run(60, 0.8);
     assert.equal(supervisor.status().realtimeFactor, 0.8);
-    assert.match(supervisor.status().warnings.join('\n'), /^falling behind: output at 0\.80x real time over the last 30s/);
+    assert.match(supervisor.status().warnings.join('\n'), /^falling behind: output at 0\.80x real time over the last 60s/);
     assert.equal(supervisor.state, 'running', 'still running');
     assert.equal(supervisor.status().lastError, null, 'not a failure');
 
-    await run(10, 1);
+    await run(20, 1);
     assert.equal(supervisor.status().warnings.length, 1, 'below 0.99 over the window, so not recovered yet');
-    await run(30, 1);
+    await run(60, 1);
+    assert.deepEqual(supervisor.status().warnings, []);
+  });
+
+  it('reads 1 for input that arrives a segment at a time, as an HLS pull does', async () => {
+    // How a pull of a live HLS stream looked (real ffmpeg): out_time jumps 4s at once, then waits for the next segment.
+    // A plain rate over a 30s window (7 or 8 segments) read 0.93 and 1.06 by turns, and the channel was reported as
+    // falling behind. 30s, as then: a window that holds a whole number of segments would hide it.
+    const { supervisor, spawner } = makeSupervisor({ realtime: true, timings: { realtimeWindowMs: 30_000 } });
+    supervisor.start();
+    await flush();
+    let outTime = 0;
+    for (let t = 0; t < 240; t++) {
+      await tick(500);
+      if (t % 8 === 0) outTime += 4;
+      spawner.last().progress(outTime);
+      await flush();
+      if (t >= 80) {
+        const factor = supervisor.status().realtimeFactor ?? 0;
+        assert.ok(factor > 0.98 && factor < 1.02, `factor ${factor} at ${t / 2}s`);
+      }
+    }
     assert.deepEqual(supervisor.status().warnings, []);
   });
 
   it('starts each run with fresh real-time history, and ignores speed on non-real-time channels', async () => {
-    const { supervisor, spawner } = makeSupervisor({ realtime: true });
+    const { supervisor, spawner } = makeSupervisor({ realtime: true, timings: { realtimeWindowMs: 60_000 } });
     supervisor.start();
     await flush();
     for (let t = 1; t <= 70; t++) {

@@ -389,7 +389,7 @@
         const button = document.createElement('button');
         button.className = 'channel';
         button.setAttribute('aria-pressed', String(selected !== null && c.id === selected.id));
-        // realtimeFactor covers the last 30s of a live channel; ffmpeg's speed averages over the whole run.
+        // realtimeFactor covers the last 2 minutes of a live channel; ffmpeg's speed averages over the whole run.
         const speed = c.realtimeFactor ?? c.progress?.speed ?? '?';
         const fps = c.progress && c.progress.fps ? ` · ${c.progress.fps.toFixed(0)} fps · ${speed}x` : '';
         button.innerHTML = `<div class="row"><strong></strong><span class="state"></span></div>

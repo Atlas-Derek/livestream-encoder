@@ -59,12 +59,12 @@ export const DEFAULT_TIMINGS: SupervisorTimings = {
   killGraceMs: 5_000,
   watchdogIntervalMs: 1_000,
   minCleanRunMs: 1_000,
-  realtimeWindowMs: 30_000,
+  realtimeWindowMs: 120_000,
 };
 
 /**
  * A real-time channel whose output advances slower than this, over the window, gets a warning; it clears at
- * RECOVERED_AT. Measured on a healthy live channel (4-rung ladder, looping file): 0.997-1.005 over 30s windows.
+ * RECOVERED_AT. Progress arrives every 0.5s, which bounds the measurement's error at about 0.5s per half window.
  */
 const FALLING_BEHIND_BELOW = 0.97;
 const RECOVERED_AT = 0.99;
@@ -89,8 +89,9 @@ export interface SupervisorStatus {
   lastErrorAt: string | null;
   progress: Progress | null;
   /**
-   * Real-time channels: output media seconds per wall-clock second over the last realtimeWindowMs; null until the
-   * run has that much history. ffmpeg's own speed is an average since it started, so it hides a recent slowdown.
+   * Real-time channels: output media seconds per wall-clock second over the last realtimeWindowMs, measured on how the
+   * lag behind the wall clock grows, so input arriving in bursts (a segment at a time) reads 1; null until the run has
+   * that much history. ffmpeg's own speed is an average since it started, so it hides a recent slowdown.
    */
   realtimeFactor: number | null;
   /**
@@ -325,7 +326,19 @@ export class Supervisor {
     while (this.#samples.length > 1 && (this.#samples[1]?.at ?? now) <= now - windowMs) this.#samples.shift();
     const oldest = this.#samples[0];
     if (oldest === undefined || now - oldest.at < windowMs) return;
-    const factor = (outTime - oldest.outTime) / ((now - oldest.at) / 1000);
+    // How far output lags behind the wall clock since the oldest sample. Input that arrives a segment at a time (an
+    // HLS pull) makes the lag rise and fall by a segment without growing, and a plain rate over the window then read
+    // 0.93 or 1.06 by turns for a healthy pull. So compare the lag's lowest point in each half of the window: it grows
+    // only when the channel really falls behind, by exactly (1 - speed) per second for a steady slowdown.
+    const halfMs = (now - oldest.at) / 2;
+    let firstHalf = Number.POSITIVE_INFINITY;
+    let secondHalf = Number.POSITIVE_INFINITY;
+    for (const sample of this.#samples) {
+      const lag = (sample.at - oldest.at) / 1000 - (sample.outTime - oldest.outTime);
+      if (sample.at - oldest.at < halfMs) firstHalf = Math.min(firstHalf, lag);
+      else secondHalf = Math.min(secondHalf, lag);
+    }
+    const factor = 1 - (secondHalf - firstHalf) / (halfMs / 1000);
     this.#realtimeFactor = factor;
 
     const behind = this.#fallingBehind === null ? factor < FALLING_BEHIND_BELOW : factor < RECOVERED_AT;

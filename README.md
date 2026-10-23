@@ -192,7 +192,7 @@ Live sources besides OBS:
 | Push SRT without the channel's passphrase | the connection is refused; the channel keeps waiting |
 | Push video only to a channel without `"audio": false` | `lastError` says to set `"audio": false` |
 | `kill -STOP <pid of the pushing ffmpeg>` for 20s, then `kill -CONT` | `stalled: no output progress for 15s` and a restart |
-| Start a live channel from `media/test/1080p60.mp4` with `X264_PRESET=placebo` | after 30s, `warnings: ["falling behind: output at 0.33x real time …"]` while the state stays `running` |
+| Start a live channel from `media/test/1080p60.mp4` with `X264_PRESET=placebo` | after about 2 minutes, `warnings: ["falling behind: output at 0.29x real time …"]` while the state stays `running` |
 | Push to a `"passthrough": true` channel with a keyframe every 250 frames (`-g 250`, like OBS's "auto") | `warnings: ["segments are up to 8.3s long instead of 4s …"]`, gone once the publisher leaves |
 | `kill -9` the API, then start it again | the old ffmpeg is killed (`killed stale ffmpeg`) and channels come back |
 | Throttle the network in Chrome DevTools, or Safari/iOS with Network Link Conditioner | lower renditions in the event log, no stalls once it settles |
@@ -635,7 +635,11 @@ While a live channel is `starting`, `restarting` or `waiting_for_publisher`, its
   - These values are what `GET /channels/:id` shows under `progress`. ffmpeg's `speed` is an average since it
     started, so it hides a recent slowdown.
 - **Keeping up.** On live channels, `realtimeFactor` is how many seconds of output were produced per second over the
-  last 30s (`null` until a run has 30s of history). A healthy channel reads 0.997–1.005.
+  last 2 minutes (`null` until a run has 2 minutes of history).
+  - It is measured on how far output lags behind the wall clock, and whether that lag grows: the lowest lag in the
+    window's second half against its first. A pull of an HLS stream gets its input a segment at a time, so its
+    output moves in 4s jumps. A plain rate over the window then read 0.93 and 1.06 by turns for a healthy pull.
+  - Healthy channels read 1.000–1.001 (a paced looping file) and 0.984–1.000 (a pull of a live HLS channel).
   - Below 0.97, `warnings` says the channel is falling behind, and it is logged once. The channel keeps running, but
     segments arrive late: players rebuffer and latency grows.
   - Causes: the ladder is too heavy for the CPU (try `VIDEO_ENCODER=h264_videotoolbox`, a faster `X264_PRESET` or
