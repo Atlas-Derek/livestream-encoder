@@ -23,7 +23,7 @@ export const RECORDINGS_DIR = 'recordings';
 /** 20261023T165802Z, with -2, -3… if one already started in that second. */
 export const RECORDING_ID = /^\d{8}T\d{6}Z(?:-\d+)?$/;
 
-const MAP_URI = /URI="([^"]+)"/;
+const URI_ATTRIBUTE = /URI="([^"]+)"/;
 
 export interface RecordingSummary {
   id: string;
@@ -85,7 +85,7 @@ interface OpenRecording {
   id: string;
   dir: string;
   playlists: Map<string, MediaPlaylist>;
-  /** Init sections already linked, by path. */
+  /** Init sections and keys already linked, by destination path. */
   linked: Set<string>;
   /** Per variant: a segment was missed, so the next one starts with a discontinuity. */
   gaps: Set<string>;
@@ -120,14 +120,17 @@ export class Recorder implements RecordingSink {
         header, mediaSequence: 0, discontinuitySequence: 0, sourceSequence: null, segments: [], trailer: [],
       };
       for (const segment of segments) {
-        const init = segment.map === null ? undefined : MAP_URI.exec(segment.map)?.[1];
         if (!(await this.#link(variantDir, dir, segment.uri))) {
           recording.gaps.add(variant); // ffmpeg already deleted it
           continue;
         }
-        if (init !== undefined && !recording.linked.has(path.join(dir, init))) {
-          await this.#link(variantDir, dir, init);
-          recording.linked.add(path.join(dir, init));
+        // The init section beside the segment, and the key (../key_<run>.key) in the channel's directory, which
+        // becomes the recording's: the same relative URIs work in the recording's playlists.
+        for (const tag of [segment.map, segment.key]) {
+          const uri = tag === null ? undefined : URI_ATTRIBUTE.exec(tag)?.[1];
+          if (uri === undefined || recording.linked.has(path.resolve(dir, uri))) continue;
+          await this.#link(variantDir, dir, uri);
+          recording.linked.add(path.resolve(dir, uri));
         }
         const previous = playlist.segments.at(-1);
         const discontinuity =
@@ -182,10 +185,13 @@ export class Recorder implements RecordingSink {
     return this.#open;
   }
 
-  /** Hard-links a file into the recording. False if it is already gone. */
-  async #link(fromDir: string, toDir: string, name: string): Promise<boolean> {
+  /** Hard-links a file, by its URI relative to a variant directory, into the recording. False if it is already gone. */
+  async #link(fromDir: string, toDir: string, uri: string): Promise<boolean> {
+    const from = path.resolve(fromDir, uri);
+    // Playlists are ours, but a URI must never reach outside the channel's directory.
+    if (!from.startsWith(`${path.resolve(this.#opts.outDir)}${path.sep}`)) throw new Error(`refusing to record ${uri}`);
     try {
-      await link(path.join(fromDir, name), path.join(toDir, name));
+      await link(from, path.resolve(toDir, uri));
     } catch (err) {
       if (isMissing(err)) return false;
       if (errorCode(err) !== 'EEXIST') throw err;

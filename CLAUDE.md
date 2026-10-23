@@ -59,6 +59,9 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
     has no bitrate, so `BANDWIDTH` is nonsense unless `-b:v`/`-b:a` are declared.
   - Audio stays muxed into each rendition. A shared audio group would save ~2% CPU (4 AAC encodes cost 1.4s per
     minute against 52s for the video ladder) at the cost of an extra playlist players must sync. Not worth it.
+  - AES-128 (`encrypt`): ffmpeg 9 refuses to encrypt fMP4 ("Encrypted fmp4 not yet supported"), so the schema allows
+    MPEG-TS only. The key info file always gives an IV: without one, players use the media sequence number, which
+    the publisher renumbers. `Segment.key` carries the key per segment like `map`; slate gets `METHOD=NONE`.
   - ffmpeg's live playlists are wrong after a restart: it never writes `EXT-X-DISCONTINUITY-SEQUENCE`, and with fMP4
     plus `append_list` one `EXT-X-MAP` (its own run's) covers every segment, earlier runs' included.
 

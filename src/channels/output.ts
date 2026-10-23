@@ -101,6 +101,39 @@ export async function prepareOutputDir(
       await sweepVariantDir(variantDir, retainMs);
     }
   }
+  if (mode === 'live') await sweepKeys(outDir, variants, retainMs);
+}
+
+const KEY_FILE = /^key_[a-z0-9]+\.key$/;
+const KEY_URI = /#EXT-X-KEY:.*URI="(?:\.\.\/)?(key_[a-z0-9]+\.key)"/g;
+
+/**
+ * Removes a channel's AES keys (key_<run>.key) that no playlist of ffmpeg's or the published ones still uses, once
+ * older than retainMs. Recordings link their own copies.
+ */
+export async function sweepKeys(outDir: string, variants: string[], retainMs = 0, now = Date.now()): Promise<string[]> {
+  const used = new Set<string>();
+  for (const variant of variants) {
+    for (const name of [FFMPEG_MEDIA_PLAYLIST, MEDIA_PLAYLIST]) {
+      let text: string;
+      try {
+        text = await readFile(path.join(outDir, variant, name), 'utf8');
+      } catch (err) {
+        if (isMissing(err)) continue;
+        throw err;
+      }
+      for (const match of text.matchAll(KEY_URI)) if (match[1] !== undefined) used.add(match[1]);
+    }
+  }
+  const removed: string[] = [];
+  for (const name of await readdir(outDir)) {
+    const file = path.join(outDir, name);
+    if (KEY_FILE.test(name) && !used.has(name) && !(await modifiedWithin(file, retainMs, now))) {
+      await rm(file, { force: true });
+      removed.push(name);
+    }
+  }
+  return removed;
 }
 
 /** Whether every variant already has slate `id` rendered (see buildSlateArgs). */

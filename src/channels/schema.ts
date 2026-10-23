@@ -83,6 +83,8 @@ export const ChannelSpecSchema = z
     dvrWindowSeconds: z.number().int().positive().max(6 * 3600).optional(),
     /** Live only: keep everything the source sends as VOD recordings, one per uninterrupted stretch. */
     record: z.boolean().default(false),
+    /** AES-128 segments, with a new key per ffmpeg run. Only worth it with signed playback URLs (PLAYBACK_SECRET). */
+    encrypt: z.boolean().default(false),
   })
   .superRefine((spec, ctx) => {
     if (spec.mode === 'vod' && !(spec.input.type === 'file' && !spec.input.loop)) {
@@ -90,6 +92,10 @@ export const ChannelSpecSchema = z
     }
     if (spec.passthrough && spec.ladder) {
       ctx.addIssue({ code: 'custom', path: ['ladder'], message: 'passthrough produces a single rendition; omit ladder' });
+    }
+    if (spec.encrypt && spec.segmentType === 'fmp4') {
+      // ffmpeg 9's HLS muxer: "Encrypted fmp4 not yet supported".
+      ctx.addIssue({ code: 'custom', path: ['encrypt'], message: 'ffmpeg cannot encrypt fMP4 segments; use "segmentType": "mpegts"' });
     }
     if (spec.mode === 'vod' && spec.record) {
       ctx.addIssue({ code: 'custom', path: ['record'], message: 'recording is for live channels; VOD output is already kept' });

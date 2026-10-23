@@ -438,6 +438,14 @@ describe('redactSecrets', () => {
   });
 });
 
+describe('encryption', () => {
+  it('passes ffmpeg the key info file, and nothing without one', () => {
+    const options = { outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER };
+    assert.equal(valueOf(buildArgs(spec({ type: 'srt' }), { ...options, keyInfoFile: '/var/keys/ch.keyinfo' }).args, '-hls_key_info_file'), '/var/keys/ch.keyinfo');
+    assert.equal(buildArgs(spec({ type: 'srt' }), options).args.includes('-hls_key_info_file'), false);
+  });
+});
+
 describe('buildSlateArgs', () => {
   const options: SlateOptions = { outDir: '/hls/ch', rungs: LADDER, hasAudio: true, segmentType: 'mpegts', encoder: ENCODER };
 

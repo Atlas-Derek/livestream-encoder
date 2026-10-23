@@ -32,6 +32,8 @@ export interface Segment {
   discontinuity: boolean;
   /** The EXT-X-MAP line in effect for this segment (fMP4), or null. */
   map: string | null;
+  /** The EXT-X-KEY line in effect for this segment (AES-128), or null when it isn't encrypted. */
+  key: string | null;
   /** EXTINF, EXT-X-PROGRAM-DATE-TIME and any other per-segment tags, in order. */
   tags: string[];
 }
@@ -87,6 +89,7 @@ export function parseMediaPlaylist(text: string): MediaPlaylist {
   let discontinuitySequence = 0;
   let sourceSequence: number | null = null;
   let map: string | null = null;
+  let key: string | null = null;
   let discontinuity = false;
   let tags: string[] = [];
 
@@ -95,7 +98,7 @@ export function parseMediaPlaylist(text: string): MediaPlaylist {
     if (line === '') continue;
     if (!line.startsWith('#')) {
       const runId = SEGMENT_NAME.exec(line)?.[1] ?? '';
-      segments.push({ seq: mediaSequence + segments.length, uri: line, runId, discontinuity, map, tags });
+      segments.push({ seq: mediaSequence + segments.length, uri: line, runId, discontinuity, map, key, tags });
       discontinuity = false;
       tags = [];
       continue;
@@ -109,6 +112,7 @@ export function parseMediaPlaylist(text: string): MediaPlaylist {
     else if (name === '#EXT-X-DISCONTINUITY-SEQUENCE') discontinuitySequence = tagInt(line);
     else if (name === '#EXT-X-DISCONTINUITY') discontinuity = true;
     else if (name === '#EXT-X-MAP') map = line;
+    else if (name === '#EXT-X-KEY') key = /METHOD=NONE/.test(line) ? null : line;
     else if (name === '#EXT-X-ENDLIST') trailer.push(line);
     else if (PLAYLIST_TAGS.has(name)) header.push(line);
     else if (name.startsWith('#EXT')) tags.push(line);
@@ -125,8 +129,14 @@ export function formatMediaPlaylist(playlist: MediaPlaylist): string {
     ...(playlist.sourceSequence === null ? [] : [`${SOURCE_SEQUENCE}${playlist.sourceSequence}`]),
   ];
   let map: string | null = null;
+  let key: string | null = null;
   for (const segment of playlist.segments) {
     if (segment.discontinuity) lines.push('#EXT-X-DISCONTINUITY');
+    // A key stays in effect until the next EXT-X-KEY, so unencrypted segments after encrypted ones need METHOD=NONE.
+    if (segment.key !== key) {
+      lines.push(segment.key ?? '#EXT-X-KEY:METHOD=NONE');
+      key = segment.key;
+    }
     if (segment.map !== null && segment.map !== map) {
       lines.push(segment.map);
       map = segment.map;
@@ -210,9 +220,14 @@ export function publishMediaPlaylist(source: string, previous: string | null, wi
   const prev = previous === null ? null : parseMediaPlaylist(previous);
   const { segments: unpublished, reset } = unpublishedSegments(next, prev);
 
-  // Each run's init section as last published. ffmpeg's playlist only has the current run's.
+  // Each run's init section and key as last published. ffmpeg's playlist only has the current run's.
   const maps = new Map<string, string | null>((prev?.segments ?? []).map((s) => [s.runId, s.map]));
-  if (next.segments.length > 0) maps.set(next.segments.at(-1)?.runId ?? '', next.segments.at(-1)?.map ?? null);
+  const keys = new Map<string, string | null>((prev?.segments ?? []).map((s) => [s.runId, s.key]));
+  const current = next.segments.at(-1);
+  if (current !== undefined) {
+    maps.set(current.runId, current.map);
+    keys.set(current.runId, current.key);
+  }
 
   let predecessor = prev?.segments.at(-1);
   const added: Segment[] = [];
@@ -221,6 +236,7 @@ export function publishMediaPlaylist(source: string, previous: string | null, wi
       ...segment,
       discontinuity: (reset && added.length === 0 && predecessor !== undefined) || startsRun(segment, predecessor),
       map: maps.get(segment.runId) ?? segment.map,
+      key: keys.has(segment.runId) ? (keys.get(segment.runId) ?? null) : segment.key,
     };
     added.push(out);
     predecessor = out;

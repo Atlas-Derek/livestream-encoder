@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { createCipheriv } from 'node:crypto';
 import { describe, it } from 'node:test';
-import { checkHls, parseMasterPlaylist, resolveRef, type FirstVideoPacket, type Loader } from './check.ts';
+import { checkHls, decryptSegment, parseMasterPlaylist, resolveRef, type FirstVideoPacket, type Loader } from './check.ts';
 
 const MASTER = [
   '#EXTM3U',
@@ -111,5 +112,24 @@ describe('parseMasterPlaylist and resolveRef', () => {
     assert.deepEqual(parseMasterPlaylist(MASTER), ['1080p/index.m3u8', '360p/index.m3u8']);
     assert.equal(resolveRef('http://localhost:8080/hls/a/master.m3u8', '720p/index.m3u8'), 'http://localhost:8080/hls/a/720p/index.m3u8');
     assert.equal(resolveRef('/var/hls/a/720p/index.m3u8', 'seg_r1_00001.ts'), '/var/hls/a/720p/seg_r1_00001.ts');
+  });
+});
+
+describe('decryptSegment', () => {
+  const key = Buffer.alloc(16, 7);
+  const plain = Buffer.from('G'.repeat(188 * 3));
+  const encrypt = (iv: Buffer) => {
+    const cipher = createCipheriv('aes-128-cbc', key, iv);
+    return new Uint8Array(Buffer.concat([cipher.update(plain), cipher.final()]));
+  };
+
+  it('uses the tag\'s IV, or else the media sequence number', () => {
+    const iv = Buffer.from('000102030405060708090a0b0c0d0e0f', 'hex');
+    const tag = '#EXT-X-KEY:METHOD=AES-128,URI="../key_r1.key",IV=0x000102030405060708090a0b0c0d0e0f';
+    assert.deepEqual(Buffer.from(decryptSegment(encrypt(iv), key, { key: tag, seq: 99 })), plain);
+
+    const bySeq = Buffer.alloc(16);
+    bySeq.writeBigUInt64BE(42n, 8);
+    assert.deepEqual(Buffer.from(decryptSegment(encrypt(bySeq), key, { key: '#EXT-X-KEY:METHOD=AES-128,URI="k"', seq: 42 })), plain);
   });
 });

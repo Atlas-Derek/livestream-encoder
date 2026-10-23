@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { prepareOutputDir, removeStaleSlates, slateReady, sweepVariantDir } from './output.ts';
+import { prepareOutputDir, removeStaleSlates, slateReady, sweepKeys, sweepVariantDir } from './output.ts';
 
 let root: string;
 
@@ -115,5 +115,20 @@ describe('slates', () => {
     assert.deepEqual((await readdir(path.join(outDir, '720p'))).sort(), [
       'index.m3u8', 'seg_r1_00001.ts', 'slate.m3u8', 'slate_new_000.ts', 'slate_old_001.ts',
     ]);
+  });
+});
+
+describe('sweepKeys', () => {
+  it('removes keys no playlist uses once they are old, and keeps new ones', async () => {
+    const outDir = path.join(root, 'ch');
+    await touch(path.join(outDir, '720p', 'index.m3u8'), '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="../key_r1.key",IV=0x1\n#EXTINF:4,\nseg_r1_00000.ts\n');
+    await touch(path.join(outDir, '720p', 'ffmpeg.m3u8'), '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="../key_r2.key",IV=0x1\n');
+    for (const name of ['key_r0.key', 'key_r1.key', 'key_r2.key', 'key_r3.key']) await touch(path.join(outDir, name));
+    const now = Date.now();
+    const old = new Date(now - 60_000);
+    for (const name of ['key_r0.key', 'key_r1.key', 'key_r2.key']) await utimes(path.join(outDir, name), old, old);
+
+    assert.deepEqual(await sweepKeys(outDir, ['720p'], 28_000, now), ['key_r0.key']);
+    assert.deepEqual((await readdir(outDir)).filter((n) => n.endsWith('.key')).sort(), ['key_r1.key', 'key_r2.key', 'key_r3.key']);
   });
 });

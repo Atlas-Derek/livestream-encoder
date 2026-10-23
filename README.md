@@ -79,6 +79,7 @@ Channel options:
 | `mode` | `live` or `vod` | `live` |
 | `segmentType` | `mpegts` or `fmp4` | `mpegts` |
 | `passthrough` | `true` copies the streams without re-encoding (single rendition) | `false` |
+| `encrypt` | AES-128 segments, with a new key per ffmpeg run, served beside the master playlist. Use it with `PLAYBACK_SECRET`: otherwise anyone who can load the playlist can fetch the key (`warnings` says so). MPEG-TS only: ffmpeg can't encrypt fMP4. | `false` |
 | `record` | Live only: keep everything the source sends as VOD recordings (see [Recording](#recording)). | `false` |
 | `dvrWindowSeconds` | Live only: how far back players can seek, up to 6 hours. The published playlist lists that many seconds of segments (at least `LIVE_LIST_SIZE`), and their files are kept for as long. Every playlist refresh then carries the whole window, so keep it to what viewers need. | none |
 | `debugOverlay` | `true` prints each rendition's name in its picture, for watching ABR switches. Not with passthrough. | `false` |
@@ -231,6 +232,16 @@ http://localhost:8080/hls/_s/<expires>/<token>/<channel>/master.m3u8
   TTL longer than a viewing session.
 - `scripts/nginx.sh` writes the secret to `var/nginx/playback.conf` (mode 600) on every start. Without a secret,
   playback is open as before and signed paths are 404.
+
+**Encryption** (`"encrypt": true`) makes segments useless without the key, so they can be cached or mirrored
+anywhere, while the key is only served under a signed URL:
+- Each ffmpeg run gets a new 16-byte key, `var/hls/<channel>/key_<run>.key`, and a random IV. Playlists carry
+  `#EXT-X-KEY:METHOD=AES-128,URI="../key_<run>.key",IV=0x…`. The IV must be explicit: without one, players use each
+  segment's media sequence number, and published playlists number segments their own way.
+- Slate segments aren't encrypted (`#EXT-X-KEY:METHOD=NONE` before them). Recordings link the key they need.
+- ffmpeg's key info file is in `var/keys/` (mode 600), outside what nginx serves. Keys no playlist uses any more are
+  deleted like old segments.
+- This is AES-128 HLS, not DRM: a viewer who may play the stream can also save the key.
 
 ### Webhooks
 

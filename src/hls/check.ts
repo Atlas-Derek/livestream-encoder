@@ -1,5 +1,6 @@
+import { createDecipheriv } from 'node:crypto';
 import path from 'node:path';
-import { parseMediaPlaylist, type MediaPlaylist } from './playlist.ts';
+import { parseMediaPlaylist, type MediaPlaylist, type Segment } from './playlist.ts';
 
 /**
  * Checks a stream against the invariants players depend on (and this encoder promises):
@@ -91,6 +92,20 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
 }
 
 const MAP_URI = /URI="([^"]+)"/;
+const IV = /IV=0[xX]([0-9a-fA-F]{32})/;
+
+/**
+ * AES-128 segments (RFC 8216 5.2): CBC with the key from the tag's URI and its IV, or, without one, the segment's
+ * media sequence number as a 128-bit big-endian integer.
+ */
+export function decryptSegment(data: Uint8Array, key: Uint8Array, segment: Pick<Segment, 'key' | 'seq'>): Uint8Array {
+  const explicit = segment.key === null ? undefined : IV.exec(segment.key)?.[1];
+  const iv = Buffer.alloc(16);
+  if (explicit !== undefined) Buffer.from(explicit, 'hex').copy(iv);
+  else iv.writeBigUInt64BE(BigInt(segment.seq), 8);
+  const decipher = createDecipheriv('aes-128-cbc', key, iv);
+  return new Uint8Array(Buffer.concat([decipher.update(data), decipher.final()]));
+}
 
 export async function checkHls(masterRef: string, options: CheckOptions): Promise<CheckReport> {
   const { loader, probeSegment } = options;
@@ -151,6 +166,8 @@ export async function checkHls(masterRef: string, options: CheckOptions): Promis
         if (segment === undefined) return null;
         const ref = refs[i] ?? '';
         let data = await loader.bytes(resolveRef(ref, segment.uri));
+        const keyUri = segment.key === null ? undefined : MAP_URI.exec(segment.key)?.[1];
+        if (keyUri !== undefined) data = decryptSegment(data, await loader.bytes(resolveRef(ref, keyUri)), segment);
         const init = segment.map === null ? undefined : MAP_URI.exec(segment.map)?.[1];
         if (init !== undefined) data = concat(await loader.bytes(resolveRef(ref, init)), data);
         return probeSegment(data);

@@ -25,7 +25,7 @@ const HEADER = ['#EXTM3U', '#EXT-X-VERSION:6', '#EXT-X-TARGETDURATION:4'];
 async function segment(uri: string, runId = 'r1', map: string | null = null): Promise<Segment> {
   await writeFile(path.join(outDir, '720p', uri), uri);
   return {
-    seq: 0, uri, runId, discontinuity: false, map,
+    seq: 0, uri, runId, discontinuity: false, map, key: null,
     tags: ['#EXTINF:4.000000,', '#EXT-X-PROGRAM-DATE-TIME:2026-10-23T16:00:00.000Z'],
   };
 }
@@ -79,6 +79,19 @@ describe('Recorder', () => {
     ]);
     assert.ok((await readdir(dir)).includes('init_r1_720p.mp4'));
     assert.equal(recorder.error, null);
+  });
+
+  it('links the key into the recording\'s root, where the same relative URI finds it', async () => {
+    const recorder = new Recorder({ outDir, channel: 'ch', logger: silentLogger });
+    await writeFile(path.join(outDir, 'key_r1.key'), 'k'.repeat(16));
+    const key = '#EXT-X-KEY:METHOD=AES-128,URI="../key_r1.key",IV=0x01';
+    await recorder.record('720p', variantDir(), HEADER, [{ ...(await segment('seg_r1_00000.ts')), key }]);
+    const dir = recordingDir(recorder.current ?? '');
+    assert.equal(await readFile(path.join(dir, 'key_r1.key'), 'utf8'), 'k'.repeat(16));
+    assert.match(await readFile(path.join(dir, '720p', 'index.m3u8'), 'utf8'), /#EXT-X-KEY:METHOD=AES-128,URI="\.\.\/key_r1\.key"/);
+
+    await recorder.record('720p', variantDir(), HEADER, [{ ...(await segment('seg_r1_00001.ts')), key: '#EXT-X-KEY:METHOD=AES-128,URI="../../x.key"' }]);
+    assert.match(recorder.error ?? '', /refusing to record \.\.\/\.\.\/x\.key/);
   });
 });
 

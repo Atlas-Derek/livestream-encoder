@@ -32,6 +32,12 @@ describe('ChannelSpecSchema', () => {
     assert.equal(ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'srt' }, ladder }).success, false);
   });
 
+  it('encrypts MPEG-TS only, which is all ffmpeg can encrypt', () => {
+    assert.equal(ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'srt' }, encrypt: true }).success, true);
+    const fmp4 = ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'srt' }, encrypt: true, segmentType: 'fmp4' });
+    assert.match(fmp4.error?.issues[0]?.message ?? '', /cannot encrypt fMP4/);
+  });
+
   it('allows a DVR window on live channels only', () => {
     const parse = (extra: Record<string, unknown>) => ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'file', path: 'a.mp4' }, ...extra });
     assert.equal(parse({ dvrWindowSeconds: 3600 }).success, true);

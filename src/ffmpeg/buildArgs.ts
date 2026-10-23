@@ -22,6 +22,11 @@ export interface BuildOptions {
   /** ffprobe result for file/pull inputs; null for push inputs, whose format is unknown until a publisher connects. */
   probe: ProbeResult | null;
   encoder: EncoderConfig;
+  /**
+   * Encrypts segments (AES-128): ffmpeg's key info file, with the key's URI, its path and an explicit IV. The IV must be
+   * explicit: without one, players use each segment's media sequence number, and published playlists renumber them.
+   */
+  keyInfoFile?: string | null;
 }
 
 export interface BuildResult {
@@ -323,10 +328,19 @@ function assertPassthroughCompatible(probe: ProbeResult | null): void {
   }
 }
 
-function hlsArgs(spec: ChannelSpec, outDir: string, runId: string, variants: string[], varStreamMap: string, encoder: EncoderConfig): string[] {
+function hlsArgs(
+  spec: ChannelSpec,
+  outDir: string,
+  runId: string,
+  variants: string[],
+  varStreamMap: string,
+  encoder: EncoderConfig,
+  keyInfoFile: string | null,
+): string[] {
   const ext = spec.segmentType === 'fmp4' ? 'm4s' : 'ts';
   const live = spec.mode === 'live';
   const args = ['-f', 'hls', '-hls_time', String(encoder.segmentSeconds), '-hls_segment_type', spec.segmentType];
+  if (keyInfoFile !== null) args.push('-hls_key_info_file', keyInfoFile);
   // Per run, so earlier runs' segments keep their own init section. ffmpeg requires %v (the variant name) in a
   // custom name when there are several variants, but leaves it unexpanded, a literal "%v", when there is one.
   if (spec.segmentType === 'fmp4') {
@@ -401,7 +415,7 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
   const varStreamMap = variants
     .map((name, i) => (hasAudio ? `v:${i},a:${i},name:${name}` : `v:${i},name:${name}`))
     .join(' ');
-  args.push(...hlsArgs(spec, outDir, runId, variants, varStreamMap, encoder));
+  args.push(...hlsArgs(spec, outDir, runId, variants, varStreamMap, encoder, options.keyInfoFile ?? null));
   return { args, variants, rungs, hasAudio };
 }
 

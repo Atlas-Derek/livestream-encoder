@@ -175,6 +175,22 @@ describe('publishing as an append log', () => {
     assert.equal(publishMediaPlaylist(ffmpeg(41, 42), before, 4).match(/seg_r1_00041/g)?.length, 1, 'watermark from the last segment');
   });
 
+  it('keeps each run\'s key with its segments, and switches encryption off for the slate', () => {
+    const key = (run: string) => `#EXT-X-KEY:METHOD=AES-128,URI="../key_${run}.key",IV=0x01`;
+    const r1 = playlist([...HEADER, '#EXT-X-MEDIA-SEQUENCE:0', key('r1'), ...seg('seg_r1_00000.ts')]);
+    let published = publishMediaPlaylist(r1, null, 4);
+    published = appendSlateSegment(published, slate, 4) ?? assert.fail('slate');
+    // ffmpeg after a restart: one key line, its own run's, above earlier runs' segments too.
+    const r2 = playlist([...HEADER, '#EXT-X-MEDIA-SEQUENCE:0', key('r2'), ...seg('seg_r1_00000.ts'), '#EXT-X-DISCONTINUITY', ...seg('seg_r2_00001.ts')]);
+    published = publishMediaPlaylist(r2, published, 4);
+    assert.deepEqual(skeleton(published).slice(5), [
+      key('r1'), 'seg_r1_00000.ts',
+      '#EXT-X-DISCONTINUITY', '#EXT-X-KEY:METHOD=NONE', 'slate_h1_000.ts',
+      '#EXT-X-DISCONTINUITY', key('r2'), 'seg_r2_00001.ts',
+    ]);
+    assert.deepEqual(parseMediaPlaylist(published).segments.map((s) => s.key === null), [false, true, false]);
+  });
+
   it('widens the target duration to fit every segment it lists', () => {
     const long = playlist([...HEADER, '#EXT-X-MEDIA-SEQUENCE:0', '#EXTINF:8.333000,', 'seg_r1_00000.ts']);
     const v1 = publishMediaPlaylist(long, null, 4);

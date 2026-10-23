@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -392,6 +392,26 @@ describe('ChannelManager', () => {
       { state: 'running', previous: 'starting', lastError: null },
       { state: 'restarting', previous: 'running', lastError: 'ffmpeg exited with code 1: Connection reset by peer' },
     ]);
+  });
+
+  it('writes a new key and key info file for each encrypted run, and warns without signed playback', async () => {
+    const { manager, spawner } = makeManager();
+    await manager.init();
+    await manager.create(spec({ id: 'enc', input: { type: 'srt' }, encrypt: true }));
+    await waitFor(() => spawner.calls.length === 1);
+    const args = spawner.calls[0] ?? [];
+    const infoFile = args[args.indexOf('-hls_key_info_file') + 1] ?? '';
+    assert.equal(infoFile, path.join(varDir, 'keys', 'enc.keyinfo'));
+    const [uri, keyFile, iv] = (await readFile(infoFile, 'utf8')).trim().split('\n');
+    assert.match(uri ?? '', /^\.\.\/key_[a-z0-9]+\.key$/);
+    assert.equal(path.dirname(keyFile ?? ''), path.join(config.hlsRoot, 'enc'));
+    assert.equal((await readFile(keyFile ?? '')).length, 16);
+    assert.match(iv ?? '', /^[0-9a-f]{32}$/);
+    assert.equal((await stat(infoFile)).mode & 0o777, 0o600);
+    assert.match(manager.get('enc').warnings.join(), /set PLAYBACK_SECRET/);
+
+    await manager.remove('enc');
+    assert.equal(existsSync(infoFile), false);
   });
 
   it('kills stale ffmpeg on boot and keeps a pid file for each running ffmpeg', async () => {

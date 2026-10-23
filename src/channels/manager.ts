@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
@@ -234,6 +235,7 @@ export class ChannelManager {
   async remove(id: string): Promise<void> {
     const entry = this.#entry(id);
     await this.#halt(entry); // the publisher's last write must land before the directory goes
+    await rm(path.join(this.#deps.config.varDir, 'keys', `${id}.keyinfo`), { force: true });
     this.#entries.delete(id);
     this.#slateErrors.delete(id);
     this.#lastStates.delete(id);
@@ -461,21 +463,41 @@ export class ChannelManager {
     const probe = probeTarget === null ? null : await this.#probe(probeTarget);
     // VOD is built aside and swapped in when complete (#finishVod).
     const outDir = spec.mode === 'vod' ? vodStagingDir(this.#outDir(spec.id)) : this.#outDir(spec.id);
+    const runId = Date.now().toString(36);
     const { args, variants, rungs, hasAudio } = buildArgs(spec, {
       outDir,
-      runId: Date.now().toString(36),
+      runId,
       ladder: spec.ladder ?? defaultLadder,
       port: record.port,
       probe,
       encoder: config,
+      keyInfoFile: spec.encrypt ? path.join(config.varDir, 'keys', `${spec.id}.keyinfo`) : null,
     });
     // Segments the last run left behind stay available as long as a player may still have them listed.
     const retainMs = retainedAfterRemoval(publishedWindow(spec, config)) * config.segmentSeconds * 1000;
     await prepareOutputDir(outDir, variants, spec.mode, retainMs);
+    // After preparing: VOD output is wiped, and the live sweep would see a key nothing references yet.
+    if (spec.encrypt) await this.#writeKey(spec.id, outDir, runId);
     if (spec.mode === 'live' && rungs !== null) {
       await this.#prepareSlate(spec.id, { outDir, rungs, hasAudio, segmentType: spec.segmentType, encoder: config });
     }
     return args;
+  }
+
+  /**
+   * A new AES-128 key for this run, served beside the channel's master playlist (key_<run>.key, so a URL never changes
+   * content), and ffmpeg's key info file, outside the served directory: the key's URI relative to the variant
+   * playlists, the key's path, and a random IV.
+   */
+  async #writeKey(id: string, outDir: string, runId: string): Promise<void> {
+    const keyFile = path.join(outDir, `key_${runId}.key`);
+    await mkdir(outDir, { recursive: true });
+    await writeFile(keyFile, randomBytes(16));
+    const infoDir = path.join(this.#deps.config.varDir, 'keys');
+    await mkdir(infoDir, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(infoDir, `${id}.keyinfo`), `../key_${runId}.key\n${keyFile}\n${randomBytes(16).toString('hex')}\n`, {
+      mode: 0o600,
+    });
   }
 
   /**
@@ -527,6 +549,9 @@ export class ChannelManager {
         ...(entry.publishError === null ? [] : [entry.publishError]),
         ...(slateError === undefined ? [] : [slateError]),
         ...(recorder?.error ? [recorder.error] : []),
+        ...(spec.encrypt && this.#deps.config.playbackSecret === null
+          ? ['segments are encrypted, but anyone who can load the playlist can fetch the key: set PLAYBACK_SECRET']
+          : []),
       ],
     };
   }
