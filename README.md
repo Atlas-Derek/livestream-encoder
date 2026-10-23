@@ -174,7 +174,7 @@ Live sources besides OBS:
 
 | Do this | Expect |
 |---|---|
-| Stop the push (Ctrl+C) and start it again | `waiting_for_publisher`, then `running`; players continue after one discontinuity |
+| Stop the push (Ctrl+C) and start it again | `waiting_for_publisher`, and players show "Be right back" about one segment later; then `running`, and players are back on the live picture |
 | Push with the wrong RTMP stream key | `lastError: rejected publisher with wrong stream key` |
 | Push SRT without the channel's passphrase | the connection is refused; the channel keeps waiting |
 | Push video only to a channel without `"audio": false` | `lastError` says to set `"audio": false` |
@@ -460,8 +460,21 @@ them every 250 ms into the `master.m3u8` and `<rung>/index.m3u8` that players fe
   `#EXT-X-DISCONTINUITY`, plus its own run's `#EXT-X-MAP` for fMP4.
 - The previously published playlist provides the rest of the history: each earlier run's init section, and how many
   discontinuities have already left the window.
-- It writes atomically (`.tmp`, then rename) and only when ffmpeg's file changed. It publishes once more after
-  ffmpeg exits, so the final segments are announced.
+- It writes atomically (`.tmp`, then rename). It publishes once more after ffmpeg exits, so the final segments are
+  announced.
+- The published playlist is an append log with its own window and sequence numbers: ffmpeg's segments are appended
+  as they appear, and a comment (`## source-sequence:41`, ignored by players) records the last one published.
+
+**The slate.** When a publisher disconnects or ffmpeg restarts, ffmpeg's playlist stops growing, and players stall
+and give up after a while. Instead, the publisher appends a "Be right back" segment each time the newest segment has
+played out, until the source is back:
+- Each live channel renders its slate once (about 2s), into each rendition's directory as `slate_<id>_000…007` with
+  a `slate.m3u8`. It goes through the same ladder and encoder settings, so it matches the renditions' `CODECS`.
+  The id is a hash of those settings, so the files are re-rendered only when they change, and their URLs never
+  change content.
+- Slate segments loop, with `#EXT-X-DISCONTINUITY` where they start, where they wrap and where the source comes back.
+  Their `#EXT-X-PROGRAM-DATE-TIME` carries on from the last live segment.
+- If the slate can't be rendered, the channel still runs, and `warnings` says why. Passthrough channels have none.
 
 nginx returns 404 for `ffmpeg*.m3u8`. VOD output is a single run, so ffmpeg writes `master.m3u8` and `index.m3u8`
 directly.

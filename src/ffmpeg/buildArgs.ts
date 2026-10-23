@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { ChannelSpec, Input, Rung } from '../channels/schema.ts';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
-import { FFMPEG_MASTER_PLAYLIST, FFMPEG_MEDIA_PLAYLIST, MASTER_PLAYLIST, MEDIA_PLAYLIST } from '../hls/playlist.ts';
+import { FFMPEG_MASTER_PLAYLIST, FFMPEG_MEDIA_PLAYLIST, MASTER_PLAYLIST, MEDIA_PLAYLIST, SLATE_PLAYLIST } from '../hls/playlist.ts';
 import type { ProbeResult } from './probe.ts';
 
 export type EncoderConfig = Pick<Config, 'videoEncoder' | 'x264Preset' | 'segmentSeconds' | 'liveListSize'>;
@@ -27,6 +28,9 @@ export interface BuildResult {
   args: string[];
   /** Variant directory names, in master playlist order. */
   variants: string[];
+  /** The encoded rungs, in variant order; null for passthrough. */
+  rungs: Rung[] | null;
+  hasAudio: boolean;
 }
 
 export const PASSTHROUGH_VARIANT = 'source';
@@ -351,6 +355,7 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
   args.push(...inputArgs(spec.input, spec.mode, port, probe));
 
   let variants: string[];
+  let rungs: Rung[] | null = null;
   if (spec.passthrough) {
     assertPassthroughCompatible(probe);
     variants = [PASSTHROUGH_VARIANT];
@@ -377,7 +382,7 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
   } else {
     // Push sources can't be probed, so they are treated as landscape.
     const portrait = probe?.width != null && probe.height != null && probe.height > probe.width;
-    const rungs = selectRungs(ladder, (portrait ? probe?.width : probe?.height) ?? null);
+    rungs = selectRungs(ladder, (portrait ? probe?.width : probe?.height) ?? null);
     variants = rungs.map((rung) => rung.name);
     args.push(...ladderArgs(rungs, portrait, spec.debugOverlay, hasAudio, probe, encoder));
   }
@@ -387,5 +392,62 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
     .map((name, i) => (hasAudio ? `v:${i},a:${i},name:${name}` : `v:${i},name:${name}`))
     .join(' ');
   args.push(...hlsArgs(spec, outDir, runId, variants, varStreamMap, encoder));
-  return { args, variants };
+  return { args, variants, rungs, hasAudio };
+}
+
+/** Slate segments rendered per variant; the publisher loops through them. */
+export const SLATE_SEGMENTS = 8;
+
+export interface SlateOptions {
+  /** The channel's output directory: the slate goes into each variant's directory beside its live segments. */
+  outDir: string;
+  rungs: Rung[];
+  hasAudio: boolean;
+  segmentType: ChannelSpec['segmentType'];
+  encoder: EncoderConfig;
+}
+
+/**
+ * Names the slate after everything that shapes it, so its segment URLs never change content (nginx lets players cache
+ * them for a day) and a channel only renders it again when its renditions change.
+ */
+export function slateId(options: Omit<SlateOptions, 'outDir'>): string {
+  const { rungs, hasAudio, segmentType, encoder } = options;
+  const key = JSON.stringify({ version: 1, rungs, hasAudio, segmentType, encoder });
+  return createHash('sha256').update(key).digest('hex').slice(0, 10);
+}
+
+/**
+ * Pure: renders the "be right back" slate the publisher splices into a live channel while its source is down (see
+ * appendSlateSegment). It goes through the same ladder filters and encoder settings as the channel, so each variant's
+ * slate matches its CODECS and cuts at segment boundaries; a discontinuity covers the change of picture and timestamps.
+ */
+export function buildSlateArgs(options: SlateOptions): string[] {
+  const { outDir, rungs, hasAudio, segmentType, encoder } = options;
+  const id = slateId(options);
+  const seconds = SLATE_SEGMENTS * encoder.segmentSeconds;
+  const card =
+    'color=c=0x15191f:s=1920x1080:r=30,' +
+    "drawtext=text='Be right back':fontsize=h/12:fontcolor=white:x=(w-tw)/2:y=(h-th)/2";
+  // One lavfi input with a video and, for channels with audio, a silent stereo stream: 0:v and 0:a, like a source.
+  const graph = hasAudio ? `${card}[out0];anullsrc=r=48000:cl=stereo[out1]` : `${card}[out0]`;
+  const probe: ProbeResult = {
+    width: 1920, height: 1080, fps: 30, videoCodec: 'h264', audioCodec: hasAudio ? 'aac' : null,
+    colorSpace: 'bt709', colorTransfer: 'bt709', durationSec: seconds,
+  };
+  const args = ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', graph, '-t', String(seconds)];
+  args.push(...ladderArgs(rungs, false, false, hasAudio, probe, encoder));
+  const names = rungs.map((rung) => rung.name);
+  const ext = segmentType === 'fmp4' ? 'm4s' : 'ts';
+  args.push('-f', 'hls', '-hls_time', String(encoder.segmentSeconds), '-hls_segment_type', segmentType);
+  if (segmentType === 'fmp4') {
+    args.push('-hls_fmp4_init_filename', names.length > 1 ? `slate_${id}_init_%v.mp4` : `slate_${id}_init.mp4`);
+  }
+  args.push(
+    '-hls_segment_filename', path.join(outDir, '%v', `slate_${id}_%03d.${ext}`),
+    '-hls_playlist_type', 'vod', '-hls_list_size', '0', '-hls_flags', 'independent_segments+temp_file',
+    '-var_stream_map', names.map((name, i) => (hasAudio ? `v:${i},a:${i},name:${name}` : `v:${i},name:${name}`)).join(' '),
+    path.join(outDir, '%v', SLATE_PLAYLIST),
+  );
+  return args;
 }

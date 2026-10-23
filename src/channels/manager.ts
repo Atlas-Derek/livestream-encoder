@@ -1,9 +1,11 @@
+import { execFile } from 'node:child_process';
 import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { z } from 'zod';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
-import { buildArgs, liveRetainedSegments, redactSecrets } from '../ffmpeg/buildArgs.ts';
+import { buildArgs, buildSlateArgs, liveRetainedSegments, redactSecrets, slateId, type SlateOptions } from '../ffmpeg/buildArgs.ts';
 import { killStaleFfmpeg, writePidFile } from '../ffmpeg/pids.ts';
 import { createProbe, createSegmentStreamProbe, type ProbeFn } from '../ffmpeg/probe.ts';
 import { fillStreamInfo, type ProbeSegmentStreams } from '../hls/codecs.ts';
@@ -18,7 +20,14 @@ import {
 } from '../ffmpeg/supervisor.ts';
 import { PlaylistPublisher } from '../hls/publisher.ts';
 import type { Logger } from '../log.ts';
-import { prepareOutputDir, publishVodOutput, removeOutputDir, vodStagingDir } from './output.ts';
+import {
+  prepareOutputDir,
+  publishVodOutput,
+  removeOutputDir,
+  removeStaleSlates,
+  slateReady,
+  vodStagingDir,
+} from './output.ts';
 import { ChannelSpecSchema, type ChannelSpec, type Rung } from './schema.ts';
 
 const ChannelRecordSchema = z.object({
@@ -52,6 +61,8 @@ export interface ManagerDeps {
   spawn?: SpawnFn;
   timings?: Partial<SupervisorTimings>;
   killStale?: (pidDir: string) => Promise<unknown>;
+  /** Runs ffmpeg once with the slate's arguments (buildSlateArgs). */
+  renderSlate?: (args: string[]) => Promise<unknown>;
 }
 
 interface Entry {
@@ -65,6 +76,9 @@ interface Entry {
 
 /** States in which ffmpeg may be writing playlists, so the publisher keeps polling. */
 const PUBLISHING_STATES = new Set<ChannelState>(['starting', 'waiting_for_publisher', 'running', 'restarting', 'stopping']);
+/** States in which a live channel's source is down but should come back: the publisher splices in the slate. */
+const SLATE_STATES = new Set<ChannelState>(['starting', 'waiting_for_publisher', 'restarting']);
+const execFileAsync = promisify(execFile);
 
 /** ffmpeg only warns about a wrong RTMP stream key and accepts the publish anyway, so enforce it here. */
 export function rejectWrongStreamKey(line: string): string | null {
@@ -119,6 +133,8 @@ export class ChannelManager {
   readonly #entries = new Map<string, Entry>();
   #writing: Promise<void> = Promise.resolve();
   readonly #pidWrites = new Set<Promise<void>>();
+  /** Why a channel has no slate, by channel id. */
+  readonly #slateErrors = new Map<string, string>();
 
   constructor(deps: ManagerDeps) {
     this.#deps = deps;
@@ -186,6 +202,7 @@ export class ChannelManager {
     const entry = this.#entry(id);
     await this.#halt(entry); // the publisher's last write must land before the directory goes
     this.#entries.delete(id);
+    this.#slateErrors.delete(id);
     await this.#persist();
     await removeOutputDir(this.#outDir(id));
   }
@@ -240,6 +257,7 @@ export class ChannelManager {
             probeStreams: this.#probeStreams,
             segmentSeconds: this.#deps.config.segmentSeconds,
             passthrough: spec.passthrough,
+            windowSize: this.#deps.config.liveListSize,
           })
         : null;
     return { record, publisher, supervisor: this.#makeSupervisor(record, publisher), publishError: null };
@@ -269,6 +287,7 @@ export class ChannelManager {
   #onStateChange(record: ChannelRecord, publisher: PlaylistPublisher | null, state: ChannelState): void {
     this.#deps.logger.info({ channel: record.spec.id, state }, 'channel state');
     if (publisher !== null) {
+      publisher.setSlate(SLATE_STATES.has(state));
       if (PUBLISHING_STATES.has(state)) publisher.resume();
       else void publisher.pause(); // stop/remove/shutdown await it themselves through #halt
     }
@@ -353,7 +372,7 @@ export class ChannelManager {
     const probe = probeTarget === null ? null : await this.#probe(probeTarget);
     // VOD is built aside and swapped in when complete (#finishVod).
     const outDir = spec.mode === 'vod' ? vodStagingDir(this.#outDir(spec.id)) : this.#outDir(spec.id);
-    const { args, variants } = buildArgs(spec, {
+    const { args, variants, rungs, hasAudio } = buildArgs(spec, {
       outDir,
       runId: Date.now().toString(36),
       ladder: spec.ladder ?? defaultLadder,
@@ -364,7 +383,33 @@ export class ChannelManager {
     // Segments the last run left behind stay as long as ffmpeg would have kept them.
     const retainMs = liveRetainedSegments(config.liveListSize) * config.segmentSeconds * 1000;
     await prepareOutputDir(outDir, variants, spec.mode, retainMs);
+    if (spec.mode === 'live' && rungs !== null) {
+      await this.#prepareSlate(spec.id, { outDir, rungs, hasAudio, segmentType: spec.segmentType, encoder: config });
+    }
     return args;
+  }
+
+  /**
+   * Renders the slate for these renditions unless it already is. Without it the channel still runs, but players stall
+   * while its source is down, so the reason goes into the channel's warnings. Passthrough has none: its codec is the
+   * source's.
+   */
+  async #prepareSlate(id: string, options: SlateOptions): Promise<void> {
+    const variants = options.rungs.map((rung) => rung.name);
+    const slate = slateId(options);
+    try {
+      if (!(await slateReady(options.outDir, variants, slate))) {
+        const args = buildSlateArgs(options);
+        if (this.#deps.renderSlate) await this.#deps.renderSlate(args);
+        else await execFileAsync(this.#deps.config.ffmpegPath, args, { timeout: 120_000 });
+      }
+      await removeStaleSlates(options.outDir, variants, slate);
+      this.#slateErrors.delete(id);
+    } catch (err) {
+      const reason = redactSecrets(err instanceof Error ? err.message : String(err));
+      this.#deps.logger.error({ channel: id, reason }, 'failed to render the slate');
+      this.#slateErrors.set(id, `no slate to show while the source is down: ${reason}`);
+    }
   }
 
   #status(entry: Entry): ChannelStatus {
@@ -375,6 +420,7 @@ export class ChannelManager {
     if (spec.input.type === 'rtmp') ingestUrl = `rtmp://${ingestHost}:${port}/live/${spec.input.streamKey}`;
     if (spec.input.type === 'srt') ingestUrl = `srt://${ingestHost}:${port}?mode=caller`;
     const status = supervisor.status();
+    const slateError = this.#slateErrors.get(spec.id);
     return {
       id: spec.id,
       spec: redact(spec),
@@ -389,6 +435,7 @@ export class ChannelManager {
         ...status.warnings,
         ...(status.state === 'running' ? (publisher?.warnings() ?? []) : []),
         ...(entry.publishError === null ? [] : [entry.publishError]),
+        ...(slateError === undefined ? [] : [slateError]),
       ],
     };
   }

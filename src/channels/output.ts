@@ -1,13 +1,15 @@
 import { constants } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { FFMPEG_MEDIA_PLAYLIST, MEDIA_PLAYLIST, playlistReferences } from '../hls/playlist.ts';
+import { FFMPEG_MEDIA_PLAYLIST, MEDIA_PLAYLIST, playlistReferences, SLATE_PLAYLIST } from '../hls/playlist.ts';
 import type { ChannelSpec } from './schema.ts';
 
 // seg_<runId>_<n>; plain seg_<n> is the naming used before run ids, still swept from existing output.
 const SEGMENT_FILE = /^seg_(?:[a-z0-9]+_)?\d+\.(ts|m4s)$/;
 // fMP4 init sections: init_<runId>_<variant>.mp4, or init_<n>.mp4 from before run ids.
 const INIT_FILE = /^init_[A-Za-z0-9_-]+\.mp4$/;
+// Slate segments and init sections, slate_<slateId>_…; the sweep leaves them, removeStaleSlates handles them.
+const SLATE_FILE = /^slate_([a-z0-9]+)_/;
 
 function isMissing(err: unknown): boolean {
   return err instanceof Error && 'code' in err && err.code === 'ENOENT';
@@ -96,6 +98,31 @@ export async function prepareOutputDir(
     if (mode === 'live') {
       await adoptLegacyPlaylist(variantDir);
       await sweepVariantDir(variantDir, retainMs);
+    }
+  }
+}
+
+/** Whether every variant already has slate `id` rendered (see buildSlateArgs). */
+export async function slateReady(outDir: string, variants: string[], id: string): Promise<boolean> {
+  for (const variant of variants) {
+    try {
+      if (!(await readFile(path.join(outDir, variant, SLATE_PLAYLIST), 'utf8')).includes(`slate_${id}_`)) return false;
+    } catch (err) {
+      if (isMissing(err)) return false;
+      throw err;
+    }
+  }
+  return true;
+}
+
+/** Removes other renders' slate files, except those the published playlist still lists (a player may fetch them). */
+export async function removeStaleSlates(outDir: string, variants: string[], id: string): Promise<void> {
+  for (const variant of variants) {
+    const dir = path.join(outDir, variant);
+    const referenced = await readReferences(path.join(dir, MEDIA_PLAYLIST));
+    for (const name of await readdir(dir)) {
+      const slate = SLATE_FILE.exec(name)?.[1];
+      if (slate !== undefined && slate !== id && !referenced.has(name)) await rm(path.join(dir, name), { force: true });
     }
   }
 }

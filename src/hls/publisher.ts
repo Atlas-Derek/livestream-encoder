@@ -3,17 +3,23 @@ import path from 'node:path';
 import type { Logger } from '../log.ts';
 import { fillStreamInfo, type ProbeSegmentStreams } from './codecs.ts';
 import {
+  appendSlateSegment,
   FFMPEG_MASTER_PLAYLIST,
   FFMPEG_MEDIA_PLAYLIST,
   MASTER_PLAYLIST,
   MEDIA_PLAYLIST,
   longestSegmentOfLastRun,
   orderVariants,
+  parseMediaPlaylist,
   publishMasterPlaylist,
   publishMediaPlaylist,
+  segmentDuration,
+  SLATE_PLAYLIST,
 } from './playlist.ts';
 
 export const DEFAULT_PUBLISH_INTERVAL_MS = 250;
+/** Segments in a published playlist, unless windowSize says otherwise. Matches LIVE_LIST_SIZE's default. */
+export const DEFAULT_WINDOW_SIZE = 6;
 
 /**
  * Segments longer than this many times hls_time get a warning. ffmpeg cuts at the first keyframe at or after hls_time,
@@ -32,6 +38,8 @@ export interface PublisherOptions {
   segmentSeconds?: number;
   /** Passthrough copies the source, so segments can only be cut at its keyframes; the warning says what to change. */
   passthrough?: boolean;
+  /** Segments per published playlist. */
+  windowSize?: number;
 }
 
 function isMissing(err: unknown): boolean {
@@ -70,6 +78,10 @@ export class PlaylistPublisher {
   readonly #longest = new Map<string, { runId: string; seconds: number }>();
   /** The run whose long segments have been logged, to log them once. */
   #loggedLongRun: string | null = null;
+  /** Set while the source is down, so slate segments keep the published playlists growing. */
+  #slate = false;
+  /** Per variant: the newest published segment and when it was published, which paces the slate behind it. */
+  readonly #edges = new Map<string, { uri: string; at: number; seconds: number }>();
 
   constructor(options: PublisherOptions) {
     this.#opts = options;
@@ -86,6 +98,14 @@ export class PlaylistPublisher {
     this.#timer = null;
     if (this.#syncing !== null) await this.#syncing;
     await this.sync();
+  }
+
+  /**
+   * Turns the slate on while the source is down (ffmpeg restarting, or waiting for a publisher) and off once it is
+   * running again. Slate segments follow the newest segment in real time, each when the one before has played out.
+   */
+  setSlate(on: boolean): void {
+    this.#slate = on;
   }
 
   /** Problems seen in the published playlists: segments much longer than hls_time, which add latency. */
@@ -133,10 +153,7 @@ export class PlaylistPublisher {
     // Variants before the master, so a player never follows the master to a playlist that doesn't exist yet.
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path.join(outDir, entry.name);
-      const from = path.join(dir, FFMPEG_MEDIA_PLAYLIST);
-      const source = await this.#publish(from, path.join(dir, MEDIA_PLAYLIST), publishMediaPlaylist);
-      if (source !== null) this.#trackSegmentLength(entry.name, source);
+      await this.#publishVariant(entry.name, path.join(outDir, entry.name));
     }
     await this.#publishMaster();
   }
@@ -163,17 +180,37 @@ export class PlaylistPublisher {
     if (complete) this.#published.set(from, source);
   }
 
-  /** Returns the source it published, or null if there was nothing new. */
-  async #publish(
-    from: string,
-    to: string,
-    transform: (source: string, previous: string | null) => string,
-  ): Promise<string | null> {
+  /** Appends ffmpeg's new segments to the variant's published playlist, then a slate segment if one is due. */
+  async #publishVariant(variant: string, dir: string): Promise<void> {
+    const windowSize = this.#opts.windowSize ?? DEFAULT_WINDOW_SIZE;
+    const from = path.join(dir, FFMPEG_MEDIA_PLAYLIST);
+    const to = path.join(dir, MEDIA_PLAYLIST);
+    let published = await readIfExists(to);
     const source = await readIfExists(from);
-    if (source === null || this.#published.get(from) === source) return null;
-    await writeAtomic(to, transform(source, await readIfExists(to)));
-    this.#published.set(from, source);
-    return source;
+    if (source !== null && this.#published.get(from) !== source) {
+      published = publishMediaPlaylist(source, published, windowSize);
+      await writeAtomic(to, published);
+      this.#published.set(from, source);
+      this.#trackSegmentLength(variant, source);
+    }
+    if (published === null) return;
+
+    const now = Date.now();
+    const newest = parseMediaPlaylist(published).segments.at(-1);
+    if (newest === undefined) return;
+    let edge = this.#edges.get(variant);
+    if (edge?.uri !== newest.uri) {
+      edge = { uri: newest.uri, at: now, seconds: segmentDuration(newest) };
+      this.#edges.set(variant, edge);
+    }
+    if (!this.#slate || now < edge.at + edge.seconds * 1000) return;
+    const slate = await readIfExists(path.join(dir, SLATE_PLAYLIST));
+    const next = slate === null ? null : appendSlateSegment(published, slate, windowSize);
+    if (next === null) return;
+    await writeAtomic(to, next);
+    const added = parseMediaPlaylist(next).segments.at(-1);
+    // Due when the previous one has played out, not when this pass ran, so the cadence doesn't drift with polling.
+    if (added !== undefined) this.#edges.set(variant, { uri: added.uri, at: edge.at + edge.seconds * 1000, seconds: segmentDuration(added) });
   }
 
   #trackSegmentLength(variant: string, source: string): void {

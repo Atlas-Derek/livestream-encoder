@@ -52,6 +52,7 @@ function makeManager(overrides: Partial<ManagerDeps> = {}) {
     probe,
     spawn: spawner.spawn,
     killStale: async () => {},
+    renderSlate: async () => {},
     ...overrides,
   });
   managers.push(manager);
@@ -341,6 +342,32 @@ describe('ChannelManager', () => {
 
     await manager.remove('vod');
     assert.equal(existsSync(staging), false);
+  });
+
+  it('renders a slate for live ladder channels only, and reports when it cannot', async () => {
+    const file = await sampleFile();
+    const rendered: string[][] = [];
+    let fail = false;
+    const { manager, spawner } = makeManager({
+      renderSlate: async (args) => {
+        if (fail) throw new Error('drawtext: no font');
+        rendered.push(args);
+      },
+    });
+    await manager.init();
+    await manager.create(spec({ id: 'live', input: { type: 'srt' } }));
+    await manager.create(spec({ id: 'copy', input: { type: 'srt' }, passthrough: true }));
+    await manager.create(spec({ id: 'vod', input: { type: 'file', path: file }, mode: 'vod' }));
+    await waitFor(() => spawner.calls.length === 3);
+    assert.equal(rendered.length, 1);
+    assert.equal(rendered[0]?.at(-1), path.join(config.hlsRoot, 'live', '%v', 'slate.m3u8'));
+    assert.deepEqual(manager.get('live').warnings, []);
+
+    fail = true;
+    await manager.create(spec({ id: 'live2', input: { type: 'srt' } }));
+    await waitFor(() => spawner.calls.length === 4);
+    assert.deepEqual(manager.get('live2').warnings, ['no slate to show while the source is down: drawtext: no font']);
+    assert.equal(manager.get('live2').state, 'waiting_for_publisher', 'the channel runs without one');
   });
 
   it('kills stale ffmpeg on boot and keeps a pid file for each running ffmpeg', async () => {

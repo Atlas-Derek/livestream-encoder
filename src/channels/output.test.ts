@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { prepareOutputDir, sweepVariantDir } from './output.ts';
+import { prepareOutputDir, removeStaleSlates, slateReady, sweepVariantDir } from './output.ts';
 
 let root: string;
 
@@ -95,5 +95,24 @@ describe('sweepVariantDir', () => {
 
     assert.deepEqual(removed.sort(), ['seg_r1_00008.ts', 'seg_r1_00011.ts.tmp']);
     assert.deepEqual((await readdir(variant)).sort(), ['ffmpeg.m3u8', 'seg_r1_00009.ts', 'seg_r1_00010.ts']);
+  });
+});
+
+describe('slates', () => {
+  it('knows when every variant has a slate, and removes other renders unless a player may still fetch them', async () => {
+    const outDir = path.join(root, 'ch');
+    await touch(path.join(outDir, '720p', 'slate.m3u8'), '#EXTM3U\nslate_new_000.ts\n');
+    assert.equal(await slateReady(outDir, ['720p'], 'new'), true);
+    assert.equal(await slateReady(outDir, ['720p'], 'other'), false);
+    assert.equal(await slateReady(outDir, ['720p', '360p'], 'new'), false, 'a variant without one');
+
+    await touch(path.join(outDir, '720p', 'index.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nslate_old_001.ts\n');
+    for (const name of ['slate_new_000.ts', 'slate_old_000.ts', 'slate_old_001.ts', 'slate_old_init_720p.mp4', 'seg_r1_00001.ts']) {
+      await touch(path.join(outDir, '720p', name));
+    }
+    await removeStaleSlates(outDir, ['720p'], 'new');
+    assert.deepEqual((await readdir(path.join(outDir, '720p'))).sort(), [
+      'index.m3u8', 'seg_r1_00001.ts', 'slate.m3u8', 'slate_new_000.ts', 'slate_old_001.ts',
+    ]);
   });
 });

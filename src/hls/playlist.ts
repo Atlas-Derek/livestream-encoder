@@ -5,21 +5,29 @@
  * - it never writes EXT-X-DISCONTINUITY-SEQUENCE, which RFC 8216 requires once a discontinuity leaves the window;
  * - with fMP4 it writes a single EXT-X-MAP for its own run, so segments from earlier runs still in the window are
  *   paired with the wrong init section.
- * Segment names carry the run id (seg_<runId>_<n>), so run boundaries can be read from the names. Everything else
- * (earlier runs' init sections, how many discontinuities have left) comes from the previously published playlist.
+ * The published playlist is an append log with its own window: each new segment of ffmpeg's is appended, and while the
+ * source is down, slate segments are (appendSlateSegment), so players keep playing instead of stalling. Its sequence
+ * numbers are its own, since slate segments take numbers ffmpeg doesn't know about; a comment records the last of
+ * ffmpeg's sequence numbers already published. Segment names carry the run id (seg_<runId>_<n>), so run boundaries can
+ * be read from the names. Earlier runs' init sections come from the previously published playlist.
  */
 export const FFMPEG_MEDIA_PLAYLIST = 'ffmpeg.m3u8';
 export const FFMPEG_MASTER_PLAYLIST = 'ffmpeg-master.m3u8';
 export const MEDIA_PLAYLIST = 'index.m3u8';
 export const MASTER_PLAYLIST = 'master.m3u8';
+/** Per variant: the pre-rendered slate, a short VOD playlist of slate_<id>_<n> segments (see buildSlateArgs). */
+export const SLATE_PLAYLIST = 'slate.m3u8';
 
 const SEGMENT_NAME = /^seg_([a-z0-9]+)_\d+\.(?:ts|m4s)$/;
+const SLATE_NAME = /^slate_[a-z0-9]+_\d+\.(?:ts|m4s)$/;
 const MAP_URI = /URI="([^"]+)"/;
+/** A comment (ignored by players): the last of ffmpeg's media sequence numbers already published. */
+const SOURCE_SEQUENCE = '## source-sequence:';
 
 export interface Segment {
   seq: number;
   uri: string;
-  /** From seg_<runId>_<n>; '' for names from before run ids. */
+  /** From seg_<runId>_<n>; '' for names from before run ids, and for slate segments. */
   runId: string;
   discontinuity: boolean;
   /** The EXT-X-MAP line in effect for this segment (fMP4), or null. */
@@ -33,6 +41,8 @@ export interface MediaPlaylist {
   header: string[];
   mediaSequence: number;
   discontinuitySequence: number;
+  /** Published playlists only: the last of ffmpeg's media sequence numbers they include. */
+  sourceSequence: number | null;
   segments: Segment[];
   /** Tags after the last segment, e.g. EXT-X-ENDLIST. */
   trailer: string[];
@@ -58,12 +68,24 @@ function tagInt(line: string): number {
   return Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
+export function isSlate(uri: string): boolean {
+  return SLATE_NAME.test(uri);
+}
+
+/** A segment's EXTINF duration in seconds, or 0. */
+export function segmentDuration(segment: Segment): number {
+  const extinf = segment.tags.find((tag) => tag.startsWith('#EXTINF:'));
+  const value = extinf === undefined ? Number.NaN : Number.parseFloat(extinf.slice('#EXTINF:'.length));
+  return Number.isFinite(value) ? value : 0;
+}
+
 export function parseMediaPlaylist(text: string): MediaPlaylist {
   const header: string[] = [];
   const trailer: string[] = [];
   const segments: Segment[] = [];
   let mediaSequence = 0;
   let discontinuitySequence = 0;
+  let sourceSequence: number | null = null;
   let map: string | null = null;
   let discontinuity = false;
   let tags: string[] = [];
@@ -78,6 +100,10 @@ export function parseMediaPlaylist(text: string): MediaPlaylist {
       tags = [];
       continue;
     }
+    if (line.startsWith(SOURCE_SEQUENCE)) {
+      sourceSequence = tagInt(line);
+      continue;
+    }
     const name = tagName(line);
     if (name === '#EXT-X-MEDIA-SEQUENCE') mediaSequence = tagInt(line);
     else if (name === '#EXT-X-DISCONTINUITY-SEQUENCE') discontinuitySequence = tagInt(line);
@@ -88,7 +114,7 @@ export function parseMediaPlaylist(text: string): MediaPlaylist {
     else if (name.startsWith('#EXT')) tags.push(line);
     // Anything else starting with # is a comment.
   }
-  return { header, mediaSequence, discontinuitySequence, segments, trailer };
+  return { header, mediaSequence, discontinuitySequence, sourceSequence, segments, trailer };
 }
 
 export function formatMediaPlaylist(playlist: MediaPlaylist): string {
@@ -96,6 +122,7 @@ export function formatMediaPlaylist(playlist: MediaPlaylist): string {
     ...playlist.header,
     `#EXT-X-MEDIA-SEQUENCE:${playlist.mediaSequence}`,
     `#EXT-X-DISCONTINUITY-SEQUENCE:${playlist.discontinuitySequence}`,
+    ...(playlist.sourceSequence === null ? [] : [`${SOURCE_SEQUENCE}${playlist.sourceSequence}`]),
   ];
   let map: string | null = null;
   for (const segment of playlist.segments) {
@@ -112,45 +139,109 @@ export function formatMediaPlaylist(playlist: MediaPlaylist): string {
 
 function startsRun(segment: Segment, predecessor: Segment | undefined): boolean {
   if (predecessor === undefined) return false;
+  if (isSlate(predecessor.uri)) return true;
   // Names from before run ids can't be told apart, so trust ffmpeg's own tag for them.
   if (segment.runId === '' && predecessor.runId === '') return segment.discontinuity;
   return segment.runId !== predecessor.runId;
 }
 
-/** Pure: the variant playlist players should see, from ffmpeg's playlist and the one published before it. */
-export function publishMediaPlaylist(source: string, previous: string | null): string {
+/**
+ * The published playlist after appending `added` to `prev` and trimming it to windowSize segments. A discontinuity
+ * tag leaves together with the segment it precedes, which advances the discontinuity sequence.
+ */
+function appendAndTrim(
+  prev: MediaPlaylist | null,
+  header: string[],
+  added: Segment[],
+  windowSize: number,
+  sourceSequence: number | null,
+): MediaPlaylist {
+  const all = [...(prev?.segments ?? []), ...added];
+  const removed = all.slice(0, Math.max(0, all.length - windowSize));
+  const segments = all.slice(removed.length);
+  const firstSeq = prev?.mediaSequence ?? added[0]?.seq ?? 0;
+  const mediaSequence = firstSeq + removed.length;
+  // RFC 8216: every EXTINF, rounded, must fit the target duration. Slate segments and earlier runs' segments may be
+  // longer than ffmpeg's current window suggests.
+  const longest = Math.max(0, ...segments.map(segmentDuration));
+  const header2 = header.map((line) =>
+    tagName(line) === '#EXT-X-TARGETDURATION' ? `#EXT-X-TARGETDURATION:${Math.max(tagInt(line), Math.round(longest))}` : line,
+  );
+  return {
+    header: header2,
+    mediaSequence,
+    discontinuitySequence: (prev?.discontinuitySequence ?? 0) + removed.filter((s) => s.discontinuity).length,
+    sourceSequence,
+    segments: segments.map((segment, i) => ({ ...segment, seq: mediaSequence + i })),
+    trailer: [],
+  };
+}
+
+/** The last of ffmpeg's sequence numbers a published playlist includes; older ones lack the comment. */
+function publishedSourceSequence(prev: MediaPlaylist | null): number | null {
+  if (prev === null) return null;
+  if (prev.sourceSequence !== null) return prev.sourceSequence;
+  const last = prev.segments.at(-1); // written before the publisher numbered its own segments: the same numbers
+  return last === undefined || isSlate(last.uri) ? null : last.seq;
+}
+
+/**
+ * Pure: the variant playlist players should see, from ffmpeg's playlist and the one published before it. ffmpeg's
+ * segments not yet published are appended, then the result is trimmed to windowSize segments.
+ */
+export function publishMediaPlaylist(source: string, previous: string | null, windowSize: number): string {
   const next = parseMediaPlaylist(source);
   const prev = previous === null ? null : parseMediaPlaylist(previous);
-  const prevSegments = prev?.segments ?? [];
-  const first = next.mediaSequence;
+  let watermark = publishedSourceSequence(prev);
+  const lastSource = next.segments.at(-1)?.seq;
+  // ffmpeg's numbering went back (its playlist was deleted): everything in it is new.
+  const reset = watermark !== null && lastSource !== undefined && lastSource < watermark;
+  if (reset) watermark = null;
 
   // Each run's init section as last published. ffmpeg's playlist only has the current run's.
-  const maps = new Map<string, string | null>(prevSegments.map((s) => [s.runId, s.map]));
-  const current = next.segments.at(-1);
-  if (current !== undefined) maps.set(current.runId, current.map);
+  const maps = new Map<string, string | null>((prev?.segments ?? []).map((s) => [s.runId, s.map]));
+  if (next.segments.length > 0) maps.set(next.segments.at(-1)?.runId ?? '', next.segments.at(-1)?.map ?? null);
 
-  // A discontinuity tag leaves the playlist together with the segment it precedes.
-  const removed = prevSegments.filter((s) => s.seq < first && s.discontinuity).length;
-
-  let predecessor = prevSegments.filter((s) => s.seq < first).at(-1);
-  const segments: Segment[] = [];
-  for (const [i, segment] of next.segments.entries()) {
-    // The first segment's predecessor has already left, so keep whatever was published for it.
-    const published = i === 0 ? prevSegments.find((s) => s.seq === segment.seq && s.uri === segment.uri) : undefined;
+  let predecessor = prev?.segments.at(-1);
+  const added: Segment[] = [];
+  for (const segment of next.segments) {
+    if (watermark !== null && segment.seq <= watermark) continue;
     const out: Segment = {
       ...segment,
-      discontinuity: published?.discontinuity ?? startsRun(segment, predecessor),
+      discontinuity: (reset && added.length === 0 && predecessor !== undefined) || startsRun(segment, predecessor),
       map: maps.get(segment.runId) ?? segment.map,
     };
-    segments.push(out);
+    added.push(out);
     predecessor = out;
   }
+  const sourceSequence = added.at(-1)?.seq ?? watermark;
+  const published = appendAndTrim(prev, next.header, added, windowSize, sourceSequence);
+  return formatMediaPlaylist({ ...published, trailer: next.trailer });
+}
 
-  return formatMediaPlaylist({
-    ...next,
-    discontinuitySequence: (prev?.discontinuitySequence ?? 0) + removed,
-    segments,
-  });
+/**
+ * Pure: the published playlist with the next slate segment appended, cycling through the slate's segments, or null if
+ * there is nothing to continue (no published segment yet, or no slate). Each pass through the slate starts with a
+ * discontinuity, its timestamps starting over. Its program date time follows on from the previous segment's.
+ */
+export function appendSlateSegment(previous: string, slate: string, windowSize: number): string | null {
+  const prev = parseMediaPlaylist(previous);
+  const slateSegments = parseMediaPlaylist(slate).segments;
+  const last = prev.segments.at(-1);
+  if (last === undefined || slateSegments.length === 0) return null;
+  const index = slateSegments.findIndex((s) => s.uri === last.uri);
+  const nextIndex = index === -1 ? 0 : (index + 1) % slateSegments.length;
+  const segment = slateSegments[nextIndex];
+  if (segment === undefined) return null;
+
+  const tags = segment.tags.filter((tag) => !tag.startsWith('#EXT-X-PROGRAM-DATE-TIME'));
+  const lastDate = last.tags.find((tag) => tag.startsWith('#EXT-X-PROGRAM-DATE-TIME:'));
+  const lastTime = lastDate === undefined ? Number.NaN : Date.parse(lastDate.slice('#EXT-X-PROGRAM-DATE-TIME:'.length));
+  if (Number.isFinite(lastTime)) {
+    tags.push(`#EXT-X-PROGRAM-DATE-TIME:${new Date(lastTime + segmentDuration(last) * 1000).toISOString()}`);
+  }
+  const added: Segment = { ...segment, runId: '', discontinuity: nextIndex === 0, tags };
+  return formatMediaPlaylist(appendAndTrim(prev, prev.header, [added], windowSize, publishedSourceSequence(prev)));
 }
 
 /** The master playlist players should see: ffmpeg's, pointing at the published variant playlists. */
@@ -211,10 +302,7 @@ export function longestSegmentOfLastRun(text: string): { runId: string; seconds:
   if (runId === undefined) return null;
   let seconds = 0;
   for (const segment of segments) {
-    if (segment.runId !== runId) continue;
-    const extinf = segment.tags.find((tag) => tag.startsWith('#EXTINF:'));
-    const duration = extinf === undefined ? Number.NaN : Number.parseFloat(extinf.slice('#EXTINF:'.length));
-    if (Number.isFinite(duration)) seconds = Math.max(seconds, duration);
+    if (segment.runId === runId) seconds = Math.max(seconds, segmentDuration(segment));
   }
   return { runId, seconds };
 }

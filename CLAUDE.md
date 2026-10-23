@@ -81,6 +81,11 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   them into `index.m3u8`/`master.m3u8` (logic in `src/hls/playlist.ts`), adding `EXT-X-DISCONTINUITY-SEQUENCE` and a
   per-run `EXT-X-MAP`. Never serve ffmpeg's copies to players. VOD is a single run, so ffmpeg writes the served
   names directly.
+- The published media playlist is an append log with its own sequence numbers and window (`LIVE_LIST_SIZE`), not a
+  copy of ffmpeg's window: ffmpeg's segments newer than the `## source-sequence:` comment are appended, and while
+  the channel is `starting`/`restarting`/`waiting_for_publisher`, slate segments (`slate_<id>_<n>`, pre-rendered per
+  variant by `buildSlateArgs` into `slate.m3u8`) are appended one per segment duration. Never derive published
+  sequence numbers from ffmpeg's. Passthrough has no slate (its codec is the source's).
 - Master playlists are finished by the app, live ones in the publisher and VOD ones when the encode completes:
   `fillStreamInfo` adds the `CODECS` and `FRAME-RATE` ffmpeg leaves out (from each variant's first segment), and
   `orderVariants` lists the start variant first (highest `BANDWIDTH` ≤ 3.5 Mbps), since players start on it.

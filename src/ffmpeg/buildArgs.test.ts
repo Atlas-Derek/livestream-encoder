@@ -4,13 +4,16 @@ import { ChannelSpecSchema, type Rung } from '../channels/schema.ts';
 import { AppError } from '../errors.ts';
 import {
   buildArgs,
+  buildSlateArgs,
   colorPlan,
   inputArgs,
   redactSecrets,
   rungFps,
   rungVideoKbps,
   selectRungs,
+  slateId,
   type EncoderConfig,
+  type SlateOptions,
 } from './buildArgs.ts';
 import type { ProbeResult } from './probe.ts';
 
@@ -415,5 +418,34 @@ describe('redactSecrets', () => {
     for (const text of ['rtmp://0.0.0.0:1935/live/key', 'https://cdn.example/live.m3u8', 'srt://0.0.0.0:9000?mode=listener']) {
       assert.equal(redactSecrets(text), text);
     }
+  });
+});
+
+describe('buildSlateArgs', () => {
+  const options: SlateOptions = { outDir: '/hls/ch', rungs: LADDER, hasAudio: true, segmentType: 'mpegts', encoder: ENCODER };
+
+  it('renders eight segments per variant through the channel\'s own ladder, named after what shapes them', () => {
+    const args = buildSlateArgs(options);
+    const id = slateId(options);
+    assert.match(id, /^[a-z0-9]{10}$/);
+    assert.match(valueOf(args, '-i') ?? '', /^color=.*drawtext=text='Be right back'.*\[out0\];anullsrc=r=48000:cl=stereo\[out1\]$/);
+    assert.equal(valueOf(args, '-t'), '32');
+    assert.equal(valueOf(args, '-b:v:0'), '5000k', 'the ladder\'s encoder settings');
+    assert.equal(valueOf(args, '-hls_segment_filename'), `/hls/ch/%v/slate_${id}_%03d.ts`);
+    assert.equal(valueOf(args, '-hls_playlist_type'), 'vod');
+    assert.equal(valueOf(args, '-var_stream_map'), 'v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:360p');
+    assert.equal(args.at(-1), '/hls/ch/%v/slate.m3u8');
+    assert.equal(args.includes('-master_pl_name'), false);
+  });
+
+  it('follows the channel: no audio, fMP4 init sections, and a new id when the renditions change', () => {
+    const silent = buildSlateArgs({ ...options, hasAudio: false });
+    assert.doesNotMatch(valueOf(silent, '-i') ?? '', /anullsrc/);
+    assert.equal(valueOf(silent, '-var_stream_map'), 'v:0,name:1080p v:1,name:720p v:2,name:360p');
+    const fmp4 = buildSlateArgs({ ...options, segmentType: 'fmp4' });
+    assert.equal(valueOf(fmp4, '-hls_fmp4_init_filename'), `slate_${slateId({ ...options, segmentType: 'fmp4' })}_init_%v.mp4`);
+    assert.notEqual(slateId(options), slateId({ ...options, rungs: LADDER.slice(1) }));
+    const elsewhere: SlateOptions = { ...options, outDir: '/elsewhere' };
+    assert.equal(slateId(options), slateId(elsewhere), 'the same slate wherever it is written');
   });
 });

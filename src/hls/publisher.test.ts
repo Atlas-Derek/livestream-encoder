@@ -34,7 +34,7 @@ describe('PlaylistPublisher', () => {
     await writeFfmpegOutput();
     await new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger }).sync();
     assert.equal(await read('master.m3u8'), MASTER.replace('ffmpeg.m3u8', 'index.m3u8'));
-    assert.match(await read('720p', 'index.m3u8'), /#EXT-X-DISCONTINUITY-SEQUENCE:0\n#EXTINF:4\.0,\nseg_r1_00009\.ts\n$/);
+    assert.match(await read('720p', 'index.m3u8'), /#EXT-X-DISCONTINUITY-SEQUENCE:0\n## source-sequence:9\n#EXTINF:4\.0,\nseg_r1_00009\.ts\n$/);
   });
 
   it('only rewrites a playlist when ffmpeg has changed it', async () => {
@@ -77,6 +77,35 @@ describe('PlaylistPublisher', () => {
     assert.deepEqual(new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger }).warnings(), []);
   });
 
+  it('fills a gap with slate segments in real time while the slate is on', async () => {
+    const short = '#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:9\n#EXTINF:0.100,\nseg_r1_00009.ts\n';
+    await writeFfmpegOutput(short);
+    await writeFile(
+      path.join(outDir, '720p', 'slate.m3u8'),
+      '#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:0.100,\nslate_h1_000.ts\n#EXTINF:0.100,\nslate_h1_001.ts\n#EXT-X-ENDLIST\n',
+    );
+    const publisher = new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger, windowSize: 3 });
+    const segments = async () => (await read('720p', 'index.m3u8')).split('\n').filter((l) => /^(seg|slate)_/.test(l));
+    const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    await publisher.sync();
+    publisher.setSlate(true);
+    await publisher.sync();
+    assert.deepEqual(await segments(), ['seg_r1_00009.ts'], 'not due until the newest segment has played out');
+    await pause(120);
+    await publisher.sync();
+    await publisher.sync();
+    assert.deepEqual(await segments(), ['seg_r1_00009.ts', 'slate_h1_000.ts'], 'one per segment duration');
+    await pause(120);
+    await publisher.sync();
+    assert.deepEqual(await segments(), ['seg_r1_00009.ts', 'slate_h1_000.ts', 'slate_h1_001.ts']);
+
+    publisher.setSlate(false);
+    await pause(120);
+    await publisher.sync();
+    assert.equal((await segments()).length, 3, 'off once the source is back');
+  });
+
   it('polls while resumed and publishes once more when paused', async () => {
     const publisher = new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger, intervalMs: 10 });
     publisher.resume();
@@ -84,7 +113,7 @@ describe('PlaylistPublisher', () => {
     await waitFor(() => existsSync(path.join(outDir, '720p', 'index.m3u8')));
     // ffmpeg finalizes its playlist as it exits, after the last poll; pause() must still publish it.
     await publisher.pause();
-    await writeFfmpegOutput(VARIANT.replace('00009', '00042'));
+    await writeFfmpegOutput(VARIANT.replace('00009', '00042').replace('SEQUENCE:9', 'SEQUENCE:42'));
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     assert.doesNotMatch(await read('720p', 'index.m3u8'), /00042/, 'no polling once paused');
     await publisher.pause();
