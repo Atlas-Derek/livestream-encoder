@@ -42,6 +42,11 @@
     select, button.plain { font: inherit; }
     .seek { position: relative; height: 14px; margin-top: 10px; border-radius: 4px; background: var(--line); cursor: pointer; }
     .seek[hidden] { display: none; }
+    button[hidden] { display: none; }
+    .rec-on { color: var(--bad); font-weight: 600; }
+    ul.recordings li { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 6px 0; font-size: 13px; }
+    ul.recordings li:last-child { border-bottom: 0; }
+    ul.recordings .actions { display: flex; gap: 6px; }
     .seek .played { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--muted); pointer-events: none; }
     .seek .preview { position: absolute; bottom: 22px; transform: translateX(-50%); border: 1px solid var(--line); border-radius: 6px; background: var(--card); padding: 4px; pointer-events: none; }
     .seek .preview .tile { background-repeat: no-repeat; border-radius: 3px; }
@@ -63,11 +68,14 @@
         <div class="meta">
           <span>Rendition: <select id="level"><option value="-1">Auto</option></select></span>
           <label><input type="checkbox" id="native"> Native HLS (Safari)</label>
+          <button class="plain" id="record" type="button" hidden></button>
           <button class="plain" id="clear-log" type="button">Clear log</button>
         </div>
         <div class="stats" id="stats"></div>
         <p class="small" id="url" style="margin-top:10px"></p>
       </div>
+      <h2>Recordings</h2>
+      <div class="card"><ul class="recordings" id="recordings"><li class="small">Pick a live channel to see its recordings.</li></ul></div>
       <h2>Events</h2>
       <div class="card"><ol class="log" id="log"><li class="small">Rendition switches, discontinuities, stalls and errors appear here.</li></ol></div>
     </section>
@@ -90,6 +98,10 @@
     let hls = null;
     let selected = null;
     let lastCc = null;
+    /** The channel whose recordings are listed: the selected channel, also while one of its recordings plays. */
+    let listChannelId = null;
+    const recordButton = document.getElementById('record');
+    const recordingList = document.getElementById('recordings');
 
     function log(text, tone = '') {
       if (logList.firstElementChild && logList.firstElementChild.classList.contains('small')) logList.replaceChildren();
@@ -187,8 +199,14 @@
       return level ? `${level.height}p · ${Math.round(level.bitrate / 1000)} kbps` : '–';
     }
 
-    function play(channel) {
+    function play(channel, channelId = channel.id) {
       selected = channel;
+      if (listChannelId !== channelId) {
+        listChannelId = channelId;
+        recordingList.replaceChildren();
+        refreshRecordings();
+      }
+      updateRecordButton();
       document.getElementById('url').innerHTML = '';
       const url = document.createElement('a');
       url.href = channel.playbackUrl;
@@ -244,6 +262,91 @@
       log(Number(levelSelect.value) === -1 ? 'rendition: auto' : `rendition pinned to ${levelName(hls.levels[levelSelect.value])}`);
     });
 
+    // Recording on demand (POST /channels/:id/recording/start|stop) and the channel's recordings.
+    function listChannel() {
+      return lastChannels.find((c) => c.id === listChannelId) || null;
+    }
+
+    function updateRecordButton() {
+      const channel = listChannel();
+      recordButton.hidden = !channel || channel.spec.mode !== 'live';
+      if (!channel) return;
+      recordButton.textContent = channel.recordingEnabled ? '■ Stop recording' : '● Record';
+      recordButton.disabled = channel.spec.record === true;
+      recordButton.title = channel.spec.record ? 'This channel records whenever it is live ("record": true)' : '';
+    }
+
+    recordButton.addEventListener('click', async () => {
+      const channel = listChannel();
+      if (!channel) return;
+      const action = channel.recordingEnabled ? 'stop' : 'start';
+      recordButton.disabled = true;
+      try {
+        const res = await fetch(`/api/channels/${channel.id}/recording/${action}`, { method: 'POST' });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+        lastChannels = lastChannels.map((c) => (c.id === body.id ? body : c));
+        log(action === 'start' ? `recording ${channel.id}: starts with its next segment` : `recording ${channel.id}: stopped`);
+      } catch (err) {
+        log(`recording ${action} failed: ${err.message}`, 'bad');
+      }
+      updateRecordButton();
+      refreshRecordings();
+    });
+
+    function formatDuration(seconds) {
+      return new Date(seconds * 1000).toISOString().slice(seconds >= 3600 ? 11 : 14, 19);
+    }
+
+    async function refreshRecordings() {
+      const channelId = listChannelId;
+      if (!channelId) return;
+      let recordings;
+      try {
+        const res = await fetch(`/api/channels/${channelId}/recordings`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        recordings = await res.json();
+      } catch (err) {
+        recordingList.replaceChildren(Object.assign(document.createElement('li'), { className: 'small', textContent: `Recordings unavailable: ${err.message}` }));
+        return;
+      }
+      if (channelId !== listChannelId) return; // another channel was picked meanwhile
+      if (recordings.length === 0) {
+        const channel = listChannel();
+        const hint = channel && channel.spec.mode === 'vod' ? 'VOD channels are not recorded.' : 'No recordings yet. Press ● Record while the channel is live.';
+        recordingList.replaceChildren(Object.assign(document.createElement('li'), { className: 'small', textContent: hint }));
+        return;
+      }
+      recordingList.replaceChildren(...recordings.slice().reverse().map((r) => {
+        const li = document.createElement('li');
+        const label = document.createElement('span');
+        label.textContent = `${new Date(r.startedAt).toLocaleString()} · ${formatDuration(r.durationSec)}`;
+        if (r.open) {
+          const on = Object.assign(document.createElement('span'), { className: 'rec-on', textContent: ' · ● recording' });
+          label.append(on);
+        }
+        const actions = document.createElement('span');
+        actions.className = 'actions';
+        const playButton = Object.assign(document.createElement('button'), { className: 'plain', type: 'button', textContent: 'Play' });
+        playButton.addEventListener('click', () => {
+          play({ id: `${channelId}/${r.id}`, playbackUrl: r.playbackUrl, thumbnailsUrl: r.thumbnailsUrl }, channelId);
+        });
+        const deleteButton = Object.assign(document.createElement('button'), { className: 'plain', type: 'button', textContent: 'Delete' });
+        deleteButton.disabled = r.open;
+        deleteButton.title = r.open ? 'Still being written; stop recording first' : '';
+        deleteButton.addEventListener('click', async () => {
+          if (!confirm(`Delete the recording from ${new Date(r.startedAt).toLocaleString()}?`)) return;
+          const res = await fetch(`/api/channels/${channelId}/recordings/${r.id}`, { method: 'DELETE' });
+          if (res.ok) log(`deleted recording ${r.id}`);
+          else log(`delete failed: ${(await res.json()).error || res.status}`, 'bad');
+          refreshRecordings();
+        });
+        actions.append(playButton, deleteButton);
+        li.append(label, actions);
+        return li;
+      }));
+    }
+
     function bufferAhead() {
       const t = video.currentTime;
       for (let i = 0; i < video.buffered.length; i++) {
@@ -296,6 +399,9 @@
         state.classList.add(c.state);
         state.textContent = c.state.replaceAll('_', ' ');
         button.querySelector('.detail').textContent = `${c.spec.input.type} · ${c.spec.mode}${fps}`;
+        if (c.recording) {
+          button.querySelector('.detail').append(Object.assign(document.createElement('span'), { className: 'rec-on', textContent: ' · ● recording' }));
+        }
         button.querySelector('.ingest').textContent = c.ingestUrl ? `ingest: ${c.ingestUrl}` : '';
         button.querySelector('.err').textContent =
           c.warnings.length > 0 ? c.warnings.join(' · ') : c.lastError && c.state !== 'running' ? `last error: ${c.lastError}` : '';
@@ -312,6 +418,8 @@
         lastChannels = await res.json();
         document.getElementById('api-status').textContent = lastChannels.length ? '' : 'No channels yet. Create one with POST /channels.';
         render(lastChannels);
+        updateRecordButton();
+        refreshRecordings();
         // A VOD's thumbnails are made after its encode completes, so they can turn up while it is selected.
         const current = selected && lastChannels.find((c) => c.id === selected.id);
         if (current && (current.thumbnailsUrl || null) !== cuesUrl) loadThumbnails(current.thumbnailsUrl || null);
