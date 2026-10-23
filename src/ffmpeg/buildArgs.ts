@@ -71,6 +71,62 @@ export function liveRetainedSegments(liveListSize: number): number {
   return liveListSize + 1;
 }
 
+/** ffprobe's color_space names, as the scale filter's in_color_matrix spells them. */
+const SCALE_MATRIX: Record<string, string> = {
+  bt709: 'bt709',
+  smpte170m: 'smpte170m',
+  bt470bg: 'bt470',
+  bt2020nc: 'bt2020',
+  bt2020c: 'bt2020',
+  fcc: 'fcc',
+  smpte240m: 'smpte240m',
+};
+
+const HDR_TRANSFERS = new Set(['smpte2084', 'arib-std-b67']);
+
+export const OUTPUT_COLOR_ARGS = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv'];
+
+export interface ColorPlan {
+  /** Runs once before the split: tone maps HDR (PQ or HLG, as most phones record) to SDR BT.709. */
+  tonemap: string | null;
+  /** Appended to each rung's scale: converts the source's YUV matrix to BT.709 in limited range. */
+  scale: string;
+  /** Tags the encoded video as BT.709 SDR. */
+  output: string[];
+}
+
+/**
+ * Every rendition is SDR BT.709, the only thing every player shows right. Without tone mapping, 8-bit H.264 from an
+ * HDR source looks washed out. Verified with ffmpeg 9: scale assumes BT.601 for an untagged source, so a BT.709 one
+ * shifted color unless in_color_matrix is given; untagged sources get what players assume (BT.709 from 720 lines up).
+ * Push sources can't be probed, so their color is left as the publisher tagged it, and the encoder carries the tags.
+ */
+export function colorPlan(probe: ProbeResult | null): ColorPlan {
+  if (probe === null) return { tonemap: null, scale: '', output: [] };
+  const transfer = probe.colorTransfer;
+  let tonemap: string | null = null;
+  let matrix: string;
+  if (transfer !== null && HDR_TRANSFERS.has(transfer)) {
+    // npl=203: HDR reference white (BT.2408, 75% HLG) becomes SDR white. mobius keeps tones below 0.8 of it linear and
+    // rolls highlights off instead of clipping them. Measured on a BT.2408 HLG test pattern against its SDR original:
+    // 29.8 dB PSNR (no tone mapping: 17.3, hable: 15.6, which darkens everything). 2.9x real time on 4K.
+    tonemap = [
+      `zscale=tin=${transfer}:pin=bt2020:min=bt2020nc:t=linear:npl=203`,
+      'format=gbrpf32le',
+      'zscale=p=bt709',
+      'tonemap=tonemap=mobius:param=0.8:desat=0',
+      'zscale=t=bt709:m=bt709:r=tv',
+      'format=yuv420p',
+    ].join(',');
+    matrix = 'bt709';
+  } else {
+    const shortSide = probe.width !== null && probe.height !== null ? Math.min(probe.width, probe.height) : null;
+    const guess = shortSide !== null && shortSide < 720 ? 'smpte170m' : 'bt709';
+    matrix = (probe.colorSpace !== null ? SCALE_MATRIX[probe.colorSpace] : undefined) ?? guess;
+  }
+  return { tonemap, scale: `:in_color_matrix=${matrix}:out_color_matrix=bt709:out_range=tv`, output: OUTPUT_COLOR_ARGS };
+}
+
 const PASSTHROUGH_VIDEO_CODECS = new Set(['h264', 'hevc']);
 const PASSTHROUGH_AUDIO_CODECS = new Set(['aac', 'mp3', 'ac3', 'eac3']);
 
@@ -159,14 +215,14 @@ function videoEncoderArgs(encoder: EncoderConfig): string[] {
 }
 
 /**
- * Optional frame-rate cap, then scaling so the short side matches the rung (width for portrait sources), then the
- * optional debug label. Rung names are [A-Za-z0-9_-], so they need no escaping in the filtergraph.
+ * Optional frame-rate cap, then scaling so the short side matches the rung (width for portrait sources) with the
+ * color conversion, then the optional debug label. Rung names are [A-Za-z0-9_-], so they need no escaping.
  */
-function rungFilter(rung: Rung, portrait: boolean, overlay: boolean): string {
+function rungFilter(rung: Rung, portrait: boolean, overlay: boolean, color: ColorPlan): string {
   const steps: string[] = [];
   // source_fps is resolved by ffmpeg, so this also works for push sources whose frame rate is unknown here.
   if (rung.maxFps !== undefined) steps.push(`fps=fps=source_fps/ceil(source_fps/${rung.maxFps})`);
-  steps.push(portrait ? `scale=${rung.height}:-2` : `scale=-2:${rung.height}`);
+  steps.push(`${portrait ? `scale=${rung.height}:-2` : `scale=-2:${rung.height}`}${color.scale}`);
   // Top right, clear of the clock the push scripts draw top left.
   if (overlay) {
     steps.push(`drawtext=text='${rung.name}':fontsize=h/14:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=12:x=w-tw-24:y=24`);
@@ -184,13 +240,15 @@ function ladderArgs(
   encoder: EncoderConfig,
 ): string[] {
   const [only] = rungs;
-  // Deinterlace once, before the split.
+  const color = colorPlan(probe);
+  // Deinterlace and tone map once, before the split.
+  const source = `[0:v]${DEINTERLACE}${color.tonemap === null ? '' : `,${color.tonemap}`}`;
   const filter =
     rungs.length === 1 && only !== undefined
-      ? `[0:v]${DEINTERLACE},${rungFilter(only, portrait, overlay)}[v0]`
+      ? `${source},${rungFilter(only, portrait, overlay, color)}[v0]`
       : [
-          `[0:v]${DEINTERLACE},split=${rungs.length}${rungs.map((_, i) => `[s${i}]`).join('')}`,
-          ...rungs.map((rung, i) => `[s${i}]${rungFilter(rung, portrait, overlay)}[v${i}]`),
+          `${source},split=${rungs.length}${rungs.map((_, i) => `[s${i}]`).join('')}`,
+          ...rungs.map((rung, i) => `[s${i}]${rungFilter(rung, portrait, overlay, color)}[v${i}]`),
         ].join(';');
   const audio =
     rungs.length === 1
@@ -202,7 +260,7 @@ function ladderArgs(
     args.push('-map', `[v${i}]`);
     if (hasAudio) args.push('-map', `[a${i}]`);
   });
-  args.push(...videoEncoderArgs(encoder), ...gopArgs(rungs, probe?.fps ?? null, encoder));
+  args.push(...videoEncoderArgs(encoder), ...color.output, ...gopArgs(rungs, probe?.fps ?? null, encoder));
   rungs.forEach((rung, i) => {
     const kbps = rung.videoBitrateKbps;
     args.push(

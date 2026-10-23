@@ -11,6 +11,10 @@ export interface ProbeResult {
   fps: number | null;
   videoCodec: string | null;
   audioCodec: string | null;
+  /** ffprobe's color_space (the YUV matrix: bt709, smpte170m, bt2020nc…); null when untagged. */
+  colorSpace: string | null;
+  /** ffprobe's color_transfer; smpte2084 (PQ) and arib-std-b67 (HLG) mean HDR. null when untagged. */
+  colorTransfer: string | null;
   /** Set for finite sources (files, VOD playlists); null for live ones, which ffprobe reports without a duration. */
   durationSec: number | null;
 }
@@ -19,6 +23,11 @@ export type ProbeFn = (input: string) => Promise<ProbeResult>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+/** ffprobe writes "unknown" or "unspecified", or leaves the key out, for untagged color properties. */
+function colorTag(value: unknown): string | null {
+  return typeof value === 'string' && value !== 'unknown' && value !== 'unspecified' && value !== '' ? value : null;
 }
 
 function positiveNumber(value: unknown): number | null {
@@ -54,6 +63,8 @@ export function parseProbeOutput(json: unknown): ProbeResult {
     fps: parseFrameRate(video?.avg_frame_rate) ?? parseFrameRate(video?.r_frame_rate),
     videoCodec: typeof video?.codec_name === 'string' ? video.codec_name : null,
     audioCodec: typeof audio?.codec_name === 'string' ? audio.codec_name : null,
+    colorSpace: colorTag(video?.color_space),
+    colorTransfer: colorTag(video?.color_transfer),
     durationSec: positiveNumber(typeof format?.duration === 'string' ? Number(format.duration) : format?.duration),
   };
 }

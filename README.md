@@ -137,6 +137,7 @@ makes a single, longer one.
 | `portrait.mp4` | 1080×1920, 720×1280, … |
 | `phone-rotated.mp4` | stored 1920×1080 with a rotate-90° flag, like most phone video: the same portrait output |
 | `hevc.mp4` | for `"passthrough": true, "segmentType": "fmp4"`: H.265 copied into the segments, with `CODECS="hvc1.…"` in the master playlist |
+| `hdr-hlg.mp4` | 10-bit HEVC HLG, as phones record: tone mapped to SDR BT.709, colors as in the other clips, not washed out |
 | `surround.mp4` | 5.1 audio, downmixed to stereo |
 | `audio-gap.ts` | audio missing from 5s to 8s: silence there, and the audio stays in sync afterwards |
 

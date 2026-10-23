@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { ChannelSpecSchema, type Rung } from '../channels/schema.ts';
 import { AppError } from '../errors.ts';
-import { buildArgs, inputArgs, redactSecrets, rungFps, selectRungs, type EncoderConfig } from './buildArgs.ts';
+import { buildArgs, colorPlan, inputArgs, redactSecrets, rungFps, selectRungs, type EncoderConfig } from './buildArgs.ts';
 import type { ProbeResult } from './probe.ts';
 
 const LADDER: Rung[] = [
@@ -13,7 +13,12 @@ const LADDER: Rung[] = [
 
 const ENCODER: EncoderConfig = { videoEncoder: 'libx264', x264Preset: 'veryfast', segmentSeconds: 4, liveListSize: 6 };
 
-const PROBE_1080: ProbeResult = { width: 1920, height: 1080, fps: 30, videoCodec: 'h264', audioCodec: 'aac', durationSec: null };
+const PROBE_1080: ProbeResult = {
+  width: 1920, height: 1080, fps: 30, videoCodec: 'h264', audioCodec: 'aac', colorSpace: 'bt709', colorTransfer: 'bt709',
+  durationSec: null,
+};
+
+const TO_709 = ':in_color_matrix=bt709:out_color_matrix=bt709:out_range=tv';
 
 function spec(input: unknown, extra: Record<string, unknown> = {}) {
   return ChannelSpecSchema.parse({ id: 'ch', input, ...extra });
@@ -47,6 +52,35 @@ describe('rungFps', () => {
     assert.ok(Math.abs(rungFps(29.97, 30) - 29.97) < 0.001);
     assert.equal(rungFps(120, 30), 30);
     assert.equal(rungFps(60, undefined), 60);
+  });
+});
+
+describe('colorPlan', () => {
+  it('converts a tagged source matrix to BT.709', () => {
+    const plan = colorPlan({ ...PROBE_1080, colorSpace: 'smpte170m', colorTransfer: 'smpte170m' });
+    assert.equal(plan.tonemap, null);
+    assert.equal(plan.scale, ':in_color_matrix=smpte170m:out_color_matrix=bt709:out_range=tv');
+    assert.equal(colorPlan({ ...PROBE_1080, colorSpace: 'bt470bg' }).scale, ':in_color_matrix=bt470:out_color_matrix=bt709:out_range=tv');
+  });
+
+  it('assumes what players do for an untagged source: BT.709 from 720 lines, BT.601 below', () => {
+    const untagged = { ...PROBE_1080, colorSpace: null, colorTransfer: null };
+    assert.match(colorPlan(untagged).scale, /in_color_matrix=bt709:/);
+    assert.match(colorPlan({ ...untagged, width: 720, height: 480 }).scale, /in_color_matrix=smpte170m:/);
+    assert.match(colorPlan({ ...untagged, width: 480, height: 854 }).scale, /in_color_matrix=smpte170m:/, 'short side of portrait');
+  });
+
+  it('tone maps PQ and HLG sources to BT.709 SDR', () => {
+    for (const transfer of ['smpte2084', 'arib-std-b67']) {
+      const plan = colorPlan({ ...PROBE_1080, colorSpace: 'bt2020nc', colorTransfer: transfer });
+      assert.match(plan.tonemap ?? '', new RegExp(`^zscale=tin=${transfer}:.*tonemap=tonemap=mobius.*,format=yuv420p$`));
+      assert.match(plan.scale, /in_color_matrix=bt709:/, 'the tone mapper outputs BT.709');
+      assert.deepEqual(plan.output, ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv']);
+    }
+  });
+
+  it('leaves unprobed push sources as the publisher tagged them', () => {
+    assert.deepEqual(colorPlan(null), { tonemap: null, scale: '', output: [] });
   });
 });
 
@@ -120,10 +154,12 @@ describe('buildArgs', () => {
       '-i', '/m/a.mp4',
       '-filter_complex',
       '[0:v]bwdif=mode=send_frame:parity=auto:deint=interlaced,split=3[s0][s1][s2];' +
-        '[s0]scale=-2:1080,format=yuv420p[v0];[s1]scale=-2:720,format=yuv420p[v1];[s2]scale=-2:360,format=yuv420p[v2];' +
+        `[s0]scale=-2:1080${TO_709},format=yuv420p[v0];[s1]scale=-2:720${TO_709},format=yuv420p[v1];` +
+        `[s2]scale=-2:360${TO_709},format=yuv420p[v2];` +
         '[0:a]aresample=async=1:first_pts=0,asplit=3[a0][a1][a2]',
       '-map', '[v0]', '-map', '[a0]', '-map', '[v1]', '-map', '[a1]', '-map', '[v2]', '-map', '[a2]',
       '-c:v', 'libx264', '-preset', 'veryfast', '-profile:v', 'high',
+      '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv',
       '-force_key_frames', 'expr:gte(t,n_forced*4)',
       '-g:v:0', '120', '-keyint_min:v:0', '120', '-g:v:1', '120', '-keyint_min:v:1', '120', '-g:v:2', '120', '-keyint_min:v:2', '120',
       '-sc_threshold', '0',
@@ -170,12 +206,22 @@ describe('buildArgs', () => {
     assert.equal(valueOf(args, '-force_key_frames'), 'expr:gte(t,n_forced*4)');
   });
 
+  it('tone maps HDR once, before the split', () => {
+    const { args } = buildArgs(spec({ type: 'file', path: '/m/hlg.mov' }, { mode: 'vod' }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, encoder: ENCODER,
+      probe: { ...PROBE_1080, colorSpace: 'bt2020nc', colorTransfer: 'arib-std-b67' },
+    });
+    const filter = valueOf(args, '-filter_complex') ?? '';
+    assert.match(filter, /^\[0:v\]bwdif=[^,]*,zscale=tin=arib-std-b67:[^;]*,format=yuv420p,split=3/);
+    assert.equal(filter.match(/tonemap=mobius/g)?.length, 1);
+  });
+
   it('scales portrait sources by width and picks rungs by the short side', () => {
     const { variants, args } = buildArgs(spec({ type: 'file', path: '/m/phone.mov' }, { mode: 'vod' }), {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, width: 1080, height: 1920 }, encoder: ENCODER,
     });
     assert.deepEqual(variants, ['1080p', '720p', '360p']);
-    assert.match(valueOf(args, '-filter_complex') ?? '', /\[s0\]scale=1080:-2,.*\[s1\]scale=720:-2,.*\[s2\]scale=360:-2,/);
+    assert.match(valueOf(args, '-filter_complex') ?? '', /\[s0\]scale=1080:-2[:,].*\[s1\]scale=720:-2[:,].*\[s2\]scale=360:-2[:,]/);
   });
 
   it('caps the frame rate of rungs with maxFps and sizes their GOP to match', () => {

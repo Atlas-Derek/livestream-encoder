@@ -19,12 +19,18 @@ describe('parseProbeOutput', () => {
   it('extracts video and audio details', () => {
     const result = parseProbeOutput({
       streams: [
-        { codec_type: 'video', codec_name: 'h264', width: 1280, height: 720, avg_frame_rate: '0/0', r_frame_rate: '25/1' },
+        {
+          codec_type: 'video', codec_name: 'h264', width: 1280, height: 720, avg_frame_rate: '0/0', r_frame_rate: '25/1',
+          color_space: 'bt709', color_transfer: 'unknown',
+        },
         { codec_type: 'audio', codec_name: 'aac' },
       ],
       format: { format_name: 'mov,mp4,m4a,3gp,3g2,mj2', duration: '60.000000' },
     });
-    assert.deepEqual(result, { width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', durationSec: 60 });
+    assert.deepEqual(result, {
+      width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', colorSpace: 'bt709', colorTransfer: null,
+      durationSec: 60,
+    });
   });
 
   it('reports the displayed size of rotated phone video', () => {
@@ -39,6 +45,9 @@ describe('parseProbeOutput', () => {
   });
 
   it('tolerates missing streams', () => {
-    assert.deepEqual(parseProbeOutput({}), { width: null, height: null, fps: null, videoCodec: null, audioCodec: null, durationSec: null });
+    assert.deepEqual(parseProbeOutput({}), {
+      width: null, height: null, fps: null, videoCodec: null, audioCodec: null, colorSpace: null, colorTransfer: null,
+      durationSec: null,
+    });
   });
 });

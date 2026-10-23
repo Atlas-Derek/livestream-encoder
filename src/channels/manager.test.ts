@@ -39,7 +39,10 @@ function makeManager(overrides: Partial<ManagerDeps> = {}) {
   const probed: string[] = [];
   const probe: ProbeFn = async (input) => {
     probed.push(input);
-    const result: ProbeResult = { width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', durationSec: null };
+    const result: ProbeResult = {
+      width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', colorSpace: null, colorTransfer: null,
+      durationSec: null,
+    };
     return result;
   };
   const manager = new ChannelManager({
@@ -224,7 +227,8 @@ describe('ChannelManager', () => {
   it('completes a pull played once when its finite source ends, and refuses one with no end', async () => {
     const { manager, spawner } = makeManager({
       probe: async (input) => ({
-        width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', durationSec: input.endsWith('.mp4') ? 60 : null,
+        width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', colorSpace: null, colorTransfer: null,
+        durationSec: input.endsWith('.mp4') ? 60 : null,
       }),
     });
     await manager.init();

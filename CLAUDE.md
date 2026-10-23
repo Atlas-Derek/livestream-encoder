@@ -12,7 +12,7 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
 - `npm run sample` — writes `media/sample.mp4` (1080p30 test pattern + tone). `npm run push:rtmp` / `npm run push:srt` —
   push a live test pattern (with a burned-in wall clock) like OBS would.
 - `npm run test-media` — labelled clips in `media/test/`, one per encoder path (portrait, rotated, 1080i, 60 fps,
-  no audio, HEVC, 5.1, audio gap). `npm run check:hls -- <master URL or path>` — checks keyframe alignment,
+  no audio, HEVC, HDR, 5.1, audio gap). `npm run check:hls -- <master URL or path>` — checks keyframe alignment,
   discontinuities and playlist rules; exits 1 on a problem. Use both to verify encoder changes against real ffmpeg.
 
 ## Conventions
@@ -46,6 +46,11 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   - `aresample=async=1` must run once in `-filter_complex` (then `asplit`), never as a per-output `-af`. With one
     per rendition, the full ladder froze for good (no error, out_time stuck) at the first audio gap of a real-time
     input, including every loop point of a looping file. Test audio changes with a looping live file.
+  - Every ladder rendition is SDR BT.709, tagged (`colorPlan`). `scale` assumes BT.601 for an untagged source, so
+    `in_color_matrix` is always given: the source's tag, else BT.709 from 720 lines up and BT.601 below (as players
+    assume). HDR (PQ/HLG) is tone mapped once before the split with zscale + `tonemap=mobius:param=0.8` at
+    `npl=203` (BT.2408 reference white); hable at npl=100 came out far too dark. Push sources can't be probed, so
+    their color is left alone and the encoder carries the publisher's tags. Passthrough is untouched.
   - The `fps` filter takes `source_fps` in its expression, which keeps the cap working for unprobed push sources.
   - HEVC passthrough: ffmpeg writes no `CODECS` at all for HEVC from an MP4 (hvcC) source, so `fillMissingCodecs`
     (src/hls/codecs.ts) adds it from the first segment. ffmpeg writes `hev1` unless given `-tag:v hvc1`, which Apple

@@ -51,6 +51,10 @@ build() {
     hevc)             # for passthrough: H.265 in MPEG-TS segments
       pattern 1920x1080 30 "HEVC"; make hevc.mp4 "${VIDEO[@]}" "${TONE[@]}" -c:v libx265 -preset fast -pix_fmt yuv420p -tag:v hvc1 \
         -x265-params log-level=error "${AAC[@]}" ;;
+    hdr-hlg)          # 10-bit HEVC HLG, as phones record (reference white at 75%, BT.2408): expect SDR that looks like 720p30
+      make hdr-hlg.mp4 -f lavfi -i "testsrc2=size=1920x1080:rate=30,$(label "HDR HLG"),zscale=tin=bt709:pin=bt709:min=bt709:t=arib-std-b67:p=bt2020:m=bt2020nc:r=tv:npl=203,format=yuv420p10le" \
+        "${TONE[@]}" -c:v libx265 -preset fast -tag:v hvc1 \
+        -x265-params log-level=error:colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc "${AAC[@]}" ;;
     surround)         # 5.1 audio: expect a stereo downmix
       pattern 1920x1080 30 "5.1 audio"; make surround.mp4 "${VIDEO[@]}" -f lavfi -i "sine=frequency=440:sample_rate=48000" \
         "${H264[@]}" -af "pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0" -c:a aac -b:a 384k ;;
@@ -63,5 +67,5 @@ build() {
   esac
 }
 
-ALL=(720p30 240p no-audio 1080p60 1080i portrait phone-rotated hevc surround audio-gap)
+ALL=(720p30 240p no-audio 1080p60 1080i portrait phone-rotated hevc hdr-hlg surround audio-gap)
 for name in "${@:-${ALL[@]}}"; do build "$name"; done
