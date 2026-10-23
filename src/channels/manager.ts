@@ -18,7 +18,7 @@ import {
 } from '../ffmpeg/supervisor.ts';
 import { PlaylistPublisher } from '../hls/publisher.ts';
 import type { Logger } from '../log.ts';
-import { prepareOutputDir, removeOutputDir } from './output.ts';
+import { prepareOutputDir, publishVodOutput, removeOutputDir, vodStagingDir } from './output.ts';
 import { ChannelSpecSchema, type ChannelSpec, type Rung } from './schema.ts';
 
 const ChannelRecordSchema = z.object({
@@ -59,6 +59,8 @@ interface Entry {
   supervisor: Supervisor;
   /** Live channels only; VOD playlists are served as ffmpeg writes them. */
   publisher: PlaylistPublisher | null;
+  /** Why the last finished VOD encode couldn't replace the served output; cleared on start. */
+  publishError: string | null;
 }
 
 /** States in which ffmpeg may be writing playlists, so the publisher keeps polling. */
@@ -164,6 +166,7 @@ export class ChannelManager {
 
   async start(id: string): Promise<ChannelStatus> {
     const entry = this.#entry(id);
+    entry.publishError = null;
     entry.record.desired = 'running';
     entry.record.completedAt = null;
     await this.#persist();
@@ -239,7 +242,7 @@ export class ChannelManager {
             passthrough: spec.passthrough,
           })
         : null;
-    return { record, publisher, supervisor: this.#makeSupervisor(record, publisher) };
+    return { record, publisher, supervisor: this.#makeSupervisor(record, publisher), publishError: null };
   }
 
   #makeSupervisor(record: ChannelRecord, publisher: PlaylistPublisher | null): Supervisor {
@@ -274,7 +277,7 @@ export class ChannelManager {
     record.desired = 'stopped';
     void this.#persistLogged();
     if (record.spec.mode === 'vod') {
-      const finish = this.#finishVodMaster(record.spec.id);
+      const finish = this.#finishVod(record.spec.id);
       this.#masterFinishes.add(finish);
       void (async () => {
         await finish;
@@ -285,21 +288,31 @@ export class ChannelManager {
 
   /**
    * A VOD master is ffmpeg's own (live ones go through the publisher), so once done, add the CODECS and FRAME-RATE it
-   * left out and list the start variant first.
+   * left out and list the start variant first. Then the finished encode replaces what was being served.
    */
-  async #finishVodMaster(id: string): Promise<void> {
+  async #finishVod(id: string): Promise<void> {
     const { logger } = this.#deps;
-    const masterPath = path.join(this.#outDir(id), MASTER_PLAYLIST);
+    const staging = vodStagingDir(this.#outDir(id));
+    const masterPath = path.join(staging, MASTER_PLAYLIST);
     try {
       const text = await readFile(masterPath, 'utf8');
-      const filled = await fillStreamInfo(text, this.#outDir(id), this.#probeStreams);
+      const filled = await fillStreamInfo(text, staging, this.#probeStreams);
       for (const error of filled.errors) logger.warn({ channel: id, error }, 'stream info not added');
       const finished = orderVariants(filled.text);
-      if (finished === text) return;
-      await writeFile(`${masterPath}.tmp`, finished);
-      await rename(`${masterPath}.tmp`, masterPath);
+      if (finished !== text) await writeFile(masterPath, finished); // not served yet, so no temp file needed
     } catch (err) {
       logger.error({ channel: id, err }, 'failed to finish the master playlist');
+    }
+    try {
+      await publishVodOutput(staging, this.#outDir(id));
+    } catch (err) {
+      logger.error({ channel: id, err }, 'failed to publish the finished VOD');
+      const entry = this.#entries.get(id);
+      if (entry !== undefined) {
+        entry.publishError = `the encode finished but could not replace the served output, which is still the previous one: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+      }
     }
   }
 
@@ -338,7 +351,8 @@ export class ChannelManager {
     }
 
     const probe = probeTarget === null ? null : await this.#probe(probeTarget);
-    const outDir = this.#outDir(spec.id);
+    // VOD is built aside and swapped in when complete (#finishVod).
+    const outDir = spec.mode === 'vod' ? vodStagingDir(this.#outDir(spec.id)) : this.#outDir(spec.id);
     const { args, variants } = buildArgs(spec, {
       outDir,
       runId: Date.now().toString(36),
@@ -371,7 +385,11 @@ export class ChannelManager {
       playbackUrl: `${publicHlsBaseUrl}/${spec.id}/master.m3u8`,
       ...status,
       // The publisher remembers the last run's segments, which only matter while it runs.
-      warnings: [...status.warnings, ...(status.state === 'running' ? (publisher?.warnings() ?? []) : [])],
+      warnings: [
+        ...status.warnings,
+        ...(status.state === 'running' ? (publisher?.warnings() ?? []) : []),
+        ...(entry.publishError === null ? [] : [entry.publishError]),
+      ],
     };
   }
 

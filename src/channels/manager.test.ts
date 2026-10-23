@@ -116,7 +116,7 @@ describe('ChannelManager', () => {
     assert.deepEqual(probed, [file]);
     const args = spawner.calls[0] ?? [];
     assert.equal(args[args.indexOf('-var_stream_map') + 1], 'v:0,a:0,name:720p v:1,a:1,name:360p');
-    await access(path.join(config.hlsRoot, 'vod', '720p'));
+    await access(path.join(config.hlsRoot, '.building-vod', '720p')); // VOD is built aside, then swapped in
     assert.equal(manager.get('vod').state, 'starting');
   });
 
@@ -283,7 +283,7 @@ describe('ChannelManager', () => {
     await waitFor(() => spawner.calls.length === 2);
   });
 
-  it('adds the CODECS ffmpeg left out of a VOD master once the encode completes', async () => {
+  it('adds the CODECS ffmpeg left out of a VOD master once the encode completes, then serves it', async () => {
     const file = await sampleFile();
     const probed: string[] = [];
     const { manager, spawner } = makeManager({
@@ -296,10 +296,11 @@ describe('ChannelManager', () => {
     await manager.create(spec({ id: 'vod', input: { type: 'file', path: file }, mode: 'vod' }));
     await waitFor(() => spawner.calls.length === 1);
 
-    // Stand in for ffmpeg, after prepare has wiped the output directory.
+    // Stand in for ffmpeg, after prepare has wiped the staging directory.
+    const staging = path.join(config.hlsRoot, '.building-vod');
     const outDir = path.join(config.hlsRoot, 'vod');
-    await writeFile(path.join(outDir, '720p', 'index.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nseg_r1_00000.ts\n#EXT-X-ENDLIST\n');
-    await writeFile(path.join(outDir, 'master.m3u8'), '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720p/index.m3u8\n');
+    await writeFile(path.join(staging, '720p', 'index.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nseg_r1_00000.ts\n#EXT-X-ENDLIST\n');
+    await writeFile(path.join(staging, 'master.m3u8'), '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720p/index.m3u8\n');
     spawner.last().progress(4);
     await waitFor(() => manager.get('vod').state === 'running');
     spawner.last().exit(0);
@@ -308,6 +309,38 @@ describe('ChannelManager', () => {
     await manager.shutdown(); // waits for the fill
     assert.equal(await readFile(path.join(outDir, 'master.m3u8'), 'utf8'), '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS="avc1.64001f"\n720p/index.m3u8\n');
     assert.deepEqual(probed, ['seg_r1_00000.ts']);
+    assert.equal(existsSync(staging), false);
+  });
+
+  it('keeps serving the previous VOD while it is rebuilt, and keeps it when the rebuild fails', async () => {
+    const file = await sampleFile();
+    const { manager, spawner } = makeManager();
+    await manager.init();
+    await manager.create(spec({ id: 'vod', input: { type: 'file', path: file }, mode: 'vod' }));
+    const staging = path.join(config.hlsRoot, '.building-vod');
+    const served = path.join(config.hlsRoot, 'vod', 'master.m3u8');
+    /** Plays one ffmpeg run that writes `master` and exits with `code`. */
+    const encode = async (master: string, code: number, state: string) => {
+      await waitFor(() => spawner.children.length > 0 && existsSync(path.join(staging, '720p')));
+      await writeFile(path.join(staging, 'master.m3u8'), master);
+      spawner.last().progress(4);
+      await waitFor(() => manager.get('vod').state === 'running');
+      spawner.last().exit(code);
+      await waitFor(() => manager.get('vod').state === state);
+    };
+
+    await encode('#EXTM3U\n# first\n', 0, 'completed');
+    await waitFor(() => existsSync(served));
+    assert.equal(await readFile(served, 'utf8'), '#EXTM3U\n# first\n');
+
+    await manager.start('vod');
+    await waitFor(() => spawner.children.length === 2);
+    assert.equal(await readFile(served, 'utf8'), '#EXTM3U\n# first\n', 'still served while rebuilding');
+    await encode('#EXTM3U\n# broken\n', 1, 'error');
+    assert.equal(await readFile(served, 'utf8'), '#EXTM3U\n# first\n', 'a failed rebuild is never swapped in');
+
+    await manager.remove('vod');
+    assert.equal(existsSync(staging), false);
   });
 
   it('kills stale ffmpeg on boot and keeps a pid file for each running ffmpeg', async () => {

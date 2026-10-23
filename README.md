@@ -381,6 +381,10 @@ The app finishes ffmpeg's master playlist (live ones when they are published, VO
 - Every segment is listed.
 - The playlist ends with `#EXT-X-ENDLIST`.
 - The player knows the total duration and can seek anywhere.
+- ffmpeg writes VOD variant playlists only when it finishes, so the encode goes into a hidden `.building-<id>`
+  directory and replaces the served one when it completes. Re-encoding a VOD (`POST /channels/:id/start`) keeps the
+  previous version playable until the new one is ready, and a failed encode never replaces it. A viewer still
+  watching the previous version when the swap happens gets 404s for its remaining segments.
 
 **Live** playlists are a sliding window, rewritten after every segment. This is the published `index.m3u8`:
 

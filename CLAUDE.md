@@ -68,7 +68,9 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
 - Live playlists use `append_list` so media sequence numbers continue across restarts, and `omit_endlist` so players
   keep polling while a publisher reconnects. Do **not** add `discont_start` (duplicates the discontinuity tag) or
   `-hls_start_number_source epoch` (with append_list it renumbers already-published segments).
-- `prepareOutputDir` sweeps orphaned segments before each live run; VOD output is wiped and rebuilt.
+- `prepareOutputDir` sweeps orphaned segments before each live run. VOD is encoded into `.building-<id>` beside the
+  served directory and swapped in (`publishVodOutput`) once it completes, so a rebuild keeps serving the previous
+  output and a failed one never replaces it. nginx returns 404 for dot-paths under `/hls/`.
 - A segment that leaves the live playlist stays on disk for one segment plus the playlist's duration (RFC 8216
   6.2.2): `-hls_delete_threshold` is `liveListSize + 1` (ffmpeg's default keeps one), and the sweep keeps
   unreferenced files younger than that window.

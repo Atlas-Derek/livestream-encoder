@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { copyFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { FFMPEG_MEDIA_PLAYLIST, MEDIA_PLAYLIST, playlistReferences } from '../hls/playlist.ts';
 import type { ChannelSpec } from './schema.ts';
@@ -100,6 +100,29 @@ export async function prepareOutputDir(
   }
 }
 
+/**
+ * Where a VOD encode is written: beside the served directory, swapped in by publishVodOutput when complete, so a
+ * rebuild never takes the previous output away mid-encode or serves a master whose variant playlists don't exist yet
+ * (ffmpeg writes VOD media playlists only when it finishes). Channel ids can't start with a dot, so this can't collide.
+ */
+export function vodStagingDir(outDir: string): string {
+  return path.join(path.dirname(outDir), `.building-${path.basename(outDir)}`);
+}
+
+/** Replaces outDir with a finished VOD encode. The served directory is missing only between two renames. */
+export async function publishVodOutput(stagingDir: string, outDir: string): Promise<void> {
+  const previous = path.join(path.dirname(outDir), `.previous-${path.basename(outDir)}`);
+  await rm(previous, { recursive: true, force: true });
+  try {
+    await rename(outDir, previous);
+  } catch (err) {
+    if (!isMissing(err)) throw err; // first encode
+  }
+  await rename(stagingDir, outDir);
+  await rm(previous, { recursive: true, force: true });
+}
+
 export async function removeOutputDir(outDir: string): Promise<void> {
   await rm(outDir, { recursive: true, force: true });
+  await rm(vodStagingDir(outDir), { recursive: true, force: true });
 }
