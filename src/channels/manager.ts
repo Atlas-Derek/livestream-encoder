@@ -250,6 +250,7 @@ export class ChannelManager {
       prepare: () => this.#prepare(record),
       restart: restartPolicy(spec),
       listener,
+      realtime: spec.mode === 'live',
       ...(rejectPublisher ? { rejectPublisher } : {}),
       redact: redactSecrets,
       logger: this.#deps.logger,

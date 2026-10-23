@@ -205,6 +205,66 @@ describe('Supervisor', () => {
     assert.equal(spawner.children.length, 2);
   });
 
+  it('warns while a real-time channel falls behind, and clears the warning once it catches up', async () => {
+    const { supervisor, spawner } = makeSupervisor({ realtime: true });
+    supervisor.start();
+    await flush();
+    let outTime = 0;
+    /** Reports progress every 500ms for `seconds` of wall time, advancing out_time at `speed`. */
+    const run = async (seconds: number, speed: number) => {
+      for (let i = 0; i < seconds * 2; i++) {
+        await tick(500);
+        outTime += 0.5 * speed;
+        spawner.last().progress(outTime);
+        await flush();
+      }
+    };
+
+    await run(20, 1);
+    assert.equal(supervisor.status().realtimeFactor, null, 'not enough history yet');
+    await run(15, 1);
+    assert.equal(supervisor.status().realtimeFactor, 1);
+    assert.equal(supervisor.status().warning, null);
+
+    await run(30, 0.8);
+    assert.equal(supervisor.status().realtimeFactor, 0.8);
+    assert.match(supervisor.status().warning ?? '', /^falling behind: output at 0\.80x real time over the last 30s/);
+    assert.equal(supervisor.state, 'running', 'still running');
+    assert.equal(supervisor.status().lastError, null, 'not a failure');
+
+    await run(10, 1);
+    assert.notEqual(supervisor.status().warning, null, 'below 0.99 over the window, so not recovered yet');
+    await run(30, 1);
+    assert.equal(supervisor.status().warning, null);
+  });
+
+  it('starts each run with fresh real-time history, and ignores speed on non-real-time channels', async () => {
+    const { supervisor, spawner } = makeSupervisor({ realtime: true });
+    supervisor.start();
+    await flush();
+    for (let t = 1; t <= 70; t++) {
+      await tick(1_000);
+      spawner.last().progress(t * 0.5);
+      await flush();
+    }
+    assert.notEqual(supervisor.status().warning, null);
+    spawner.last().exit(1);
+    await tick(0);
+    assert.equal(supervisor.status().warning, null);
+    assert.equal(supervisor.status().realtimeFactor, null);
+
+    const vod = makeSupervisor({ restart: 'never' });
+    vod.supervisor.start();
+    await flush();
+    for (let t = 1; t <= 70; t++) {
+      await tick(1_000);
+      vod.spawner.last().progress(t * 0.5);
+      await flush();
+    }
+    assert.equal(vod.supervisor.status().realtimeFactor, null);
+    assert.equal(vod.supervisor.status().warning, null);
+  });
+
   it('kills an ffmpeg that keeps reporting progress while out_time stays put', async () => {
     // How the per-output aresample freeze looked: progress blocks kept coming, out_time never moved.
     const { supervisor, spawner } = makeSupervisor({ timings: { stallTimeoutMs: 15_000 } });

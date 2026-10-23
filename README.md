@@ -175,6 +175,7 @@ Live sources besides OBS:
 | Push SRT without the channel's passphrase | the connection is refused; the channel keeps waiting |
 | Push video only to a channel without `"audio": false` | `lastError` says to set `"audio": false` |
 | `kill -STOP <pid of the pushing ffmpeg>` for 20s, then `kill -CONT` | `stalled: no output progress for 15s` and a restart |
+| Start a live channel from `media/test/1080p60.mp4` with `X264_PRESET=placebo` | after 30s, `warning: falling behind: output at 0.33x real time …` while the state stays `running` |
 | `kill -9` the API, then start it again | the old ffmpeg is killed (`killed stale ffmpeg`) and channels come back |
 | Throttle the network in Chrome DevTools, or Safari/iOS with Network Link Conditioner | lower renditions in the event log, no stalls once it settles |
 | Create one more RTMP channel than `RTMP_PORTS` allows | `409 no free rtmp ports` |
@@ -460,8 +461,15 @@ Each channel has one `Supervisor`, which runs this state machine:
 - **Progress.** `-progress pipe:1` makes ffmpeg print a block of `key=value` lines about twice a second: `frame`,
   `fps`, `bitrate`, `out_time_us` and `speed`.
   - The first block in which `out_time` moves forward switches the state to `running`.
-  - These values are what `GET /channels/:id` shows under `progress`. A `speed` of about `1.0x` means a live channel
-    is keeping up.
+  - These values are what `GET /channels/:id` shows under `progress`. ffmpeg's `speed` is an average since it
+    started, so it hides a recent slowdown.
+- **Keeping up.** On live channels, `realtimeFactor` is how many seconds of output were produced per second over the
+  last 30s (`null` until a run has 30s of history). A healthy channel reads 0.997–1.005.
+  - Below 0.97, `warning` says the channel is falling behind, and it is logged once. The channel keeps running, but
+    segments arrive late: players rebuffer and latency grows.
+  - Causes: the ladder is too heavy for the CPU (try `VIDEO_ENCODER=h264_videotoolbox`, a faster `X264_PRESET` or
+    fewer rungs), or a push or pull source is delivering slower than real time.
+  - The warning clears once the factor is back to 0.99, and on every restart.
 - **Log.** The last 50 stderr lines are kept as `stderrTail`. When ffmpeg dies, the last line usually explains why,
   and it is included in `lastError`. Set `LOG_LEVEL=debug` to log every line.
 

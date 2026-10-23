@@ -47,6 +47,8 @@ export interface SupervisorTimings {
   watchdogIntervalMs: number;
   /** A listener exiting cleanly faster than this counts as a failure, not a publisher leaving. */
   minCleanRunMs: number;
+  /** Real-time channels: the window over which output speed is measured against the wall clock. */
+  realtimeWindowMs: number;
 }
 
 export const DEFAULT_TIMINGS: SupervisorTimings = {
@@ -57,7 +59,15 @@ export const DEFAULT_TIMINGS: SupervisorTimings = {
   killGraceMs: 5_000,
   watchdogIntervalMs: 1_000,
   minCleanRunMs: 1_000,
+  realtimeWindowMs: 30_000,
 };
+
+/**
+ * A real-time channel whose output advances slower than this, over the window, gets a warning; it clears at
+ * RECOVERED_AT. Measured on a healthy live channel (4-rung ladder, looping file): 0.997-1.005 over 30s windows.
+ */
+const FALLING_BEHIND_BELOW = 0.97;
+const RECOVERED_AT = 0.99;
 
 export interface Progress {
   frame: number | null;
@@ -78,6 +88,13 @@ export interface SupervisorStatus {
   lastError: string | null;
   lastErrorAt: string | null;
   progress: Progress | null;
+  /**
+   * Real-time channels: output media seconds per wall-clock second over the last realtimeWindowMs; null until the
+   * run has that much history. ffmpeg's own speed is an average since it started, so it hides a recent slowdown.
+   */
+  realtimeFactor: number | null;
+  /** Set while a real-time channel falls behind: it still runs, but players will rebuffer and latency grows. */
+  warning: string | null;
   stderrTail: string[];
 }
 
@@ -89,6 +106,8 @@ export interface SupervisorOptions {
   restart: RestartPolicy;
   /** rtmp/srt: ffmpeg waits for a publisher, so the stall watchdog is off until output flows. */
   listener: boolean;
+  /** Input arrives at real time (live channels), so output slower than that is reported as falling behind. */
+  realtime?: boolean;
   /** Returns a reason when a stderr line means the publisher must be dropped (killed and re-armed). */
   rejectPublisher?: (line: string) => string | null;
   /** Masks secrets (passphrases, URL credentials) in logged args, stderr lines and error messages. */
@@ -158,6 +177,10 @@ export class Supervisor {
   #progressBlock: Record<string, string> = {};
   #lastOutTime: number | null = null;
   #lastAdvanceAt = 0;
+  /** (wall ms, out_time) pairs covering the last realtimeWindowMs, oldest first. */
+  #samples: Array<{ at: number; outTime: number }> = [];
+  #realtimeFactor: number | null = null;
+  #warning: string | null = null;
   #stderrTail: string[] = [];
   #exitWaiters: Array<() => void> = [];
 
@@ -182,6 +205,8 @@ export class Supervisor {
       lastError: this.#lastError,
       lastErrorAt: this.#lastErrorAt === null ? null : new Date(this.#lastErrorAt).toISOString(),
       progress: this.#progress,
+      realtimeFactor: this.#realtimeFactor === null ? null : Math.round(this.#realtimeFactor * 1000) / 1000,
+      warning: this.#warning,
       stderrTail: [...this.#stderrTail],
     };
   }
@@ -253,6 +278,7 @@ export class Supervisor {
     this.#progressBlock = {};
     this.#lastOutTime = null;
     this.#lastAdvanceAt = Date.now();
+    this.#resetRealtime();
     this.#rejection = null;
     this.#stallReason = null;
     this.#opts.onPid?.(child.pid ?? null);
@@ -284,6 +310,39 @@ export class Supervisor {
         this.#setState('running');
       }
     }
+    if (this.#opts.realtime === true && this.#lastOutTime !== null) this.#measureRealtime(this.#lastOutTime);
+  }
+
+  #measureRealtime(outTime: number): void {
+    const now = Date.now();
+    const windowMs = this.#timings.realtimeWindowMs;
+    this.#samples.push({ at: now, outTime });
+    // Keep one sample at or before the window's start, so the measured span covers the whole window.
+    while (this.#samples.length > 1 && (this.#samples[1]?.at ?? now) <= now - windowMs) this.#samples.shift();
+    const oldest = this.#samples[0];
+    if (oldest === undefined || now - oldest.at < windowMs) return;
+    const factor = (outTime - oldest.outTime) / ((now - oldest.at) / 1000);
+    this.#realtimeFactor = factor;
+
+    const behind = this.#warning === null ? factor < FALLING_BEHIND_BELOW : factor < RECOVERED_AT;
+    if (behind) {
+      if (this.#warning === null) {
+        this.#opts.logger.warn({ channel: this.#opts.id, realtimeFactor: factor }, 'falling behind real time');
+      }
+      // Kept current while it lasts.
+      this.#warning =
+        `falling behind: output at ${factor.toFixed(2)}x real time over the last ${Math.round(windowMs / 1000)}s ` +
+        '(the encoder is too slow for the ladder, or the input is arriving late)';
+    } else if (this.#warning !== null) {
+      this.#warning = null;
+      this.#opts.logger.info({ channel: this.#opts.id, realtimeFactor: factor }, 'caught up with real time');
+    }
+  }
+
+  #resetRealtime(): void {
+    this.#samples = [];
+    this.#realtimeFactor = null;
+    this.#warning = null;
   }
 
   #onStderrLine(raw: string): void {
@@ -344,6 +403,7 @@ export class Supervisor {
     const ranMs = this.#spawnedAt === null ? 0 : Date.now() - this.#spawnedAt;
     this.#spawnedAt = null;
     this.#runningSince = null;
+    this.#resetRealtime();
     this.#opts.logger.info({ channel: this.#opts.id, code, signal, ranMs }, 'ffmpeg exited');
 
     const waiters = this.#exitWaiters;

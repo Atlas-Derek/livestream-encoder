@@ -197,7 +197,9 @@
         const button = document.createElement('button');
         button.className = 'channel';
         button.setAttribute('aria-pressed', String(selected !== null && c.id === selected.id));
-        const fps = c.progress && c.progress.fps ? ` · ${c.progress.fps.toFixed(0)} fps · ${c.progress.speed ?? '?'}x` : '';
+        // realtimeFactor covers the last 30s of a live channel; ffmpeg's speed averages over the whole run.
+        const speed = c.realtimeFactor ?? c.progress?.speed ?? '?';
+        const fps = c.progress && c.progress.fps ? ` · ${c.progress.fps.toFixed(0)} fps · ${speed}x` : '';
         button.innerHTML = `<div class="row"><strong></strong><span class="state"></span></div>
           <div class="small detail"></div><div class="small ingest"></div><div class="small err"></div>`;
         button.querySelector('strong').textContent = c.id;
@@ -206,7 +208,8 @@
         state.textContent = c.state.replaceAll('_', ' ');
         button.querySelector('.detail').textContent = `${c.spec.input.type} · ${c.spec.mode}${fps}`;
         button.querySelector('.ingest').textContent = c.ingestUrl ? `ingest: ${c.ingestUrl}` : '';
-        button.querySelector('.err').textContent = c.lastError && c.state !== 'running' ? `last error: ${c.lastError}` : '';
+        button.querySelector('.err').textContent =
+          c.warning ?? (c.lastError && c.state !== 'running' ? `last error: ${c.lastError}` : '');
         button.addEventListener('click', () => play(c));
         li.append(button);
         return li;
