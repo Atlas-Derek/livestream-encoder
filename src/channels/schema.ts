@@ -2,9 +2,12 @@ import { z } from 'zod';
 
 export const RungSchema = z.object({
   name: z.string().regex(/^[A-Za-z0-9_-]+$/, 'rung name may only contain letters, digits, _ and -'),
+  /** The picture's short side: the height of landscape video, the width of portrait video. */
   height: z.number().int().min(144).max(4320),
   videoBitrateKbps: z.number().int().positive(),
   audioBitrateKbps: z.number().int().positive(),
+  /** Caps the frame rate by dropping every 2nd, 3rd… frame (60 -> 30, 50 -> 25); lower rungs gain little from 60. */
+  maxFps: z.number().positive().max(240).optional(),
 });
 export type Rung = z.infer<typeof RungSchema>;
 

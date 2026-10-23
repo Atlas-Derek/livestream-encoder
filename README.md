@@ -71,7 +71,7 @@ Channel options:
 | `mode` | `live` or `vod` | `live` |
 | `segmentType` | `mpegts` or `fmp4` | `mpegts` |
 | `passthrough` | `true` copies the streams without re-encoding (single rendition) | `false` |
-| `ladder` | per-channel list of rungs: `[{name, height, videoBitrateKbps, audioBitrateKbps}]` | `config/ladder.json` |
+| `ladder` | per-channel list of rungs: `[{name, height, videoBitrateKbps, audioBitrateKbps, maxFps?}]`. `height` is the short side, so it is the width for portrait sources. | `config/ladder.json` |
 | `input.audio` (rtmp, srt) | `false` for a video-only encoder. Push sources can't be probed before a publisher connects, so this decides whether the renditions carry audio. A publisher that sends no audio to a channel expecting it is disconnected, and `lastError` says to set this. | `true` |
 
 Channels persist in `var/channels.json` and restart when the API starts. Completed VOD encodes are not redone.
@@ -178,14 +178,16 @@ This is the command for a looping file played out as a live channel, abridged an
 ```
 ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
   -re -stream_loop -1 -i media/sample.mp4                          # 1. input
-  -filter_complex "[0:v]split=4[s0][s1][s2][s3];
-                   [s0]scale=-2:1080,format=yuv420p[v0];
-                   [s1]scale=-2:720,format=yuv420p[v1]; …"         # 2. decode once, scale 4 ways
+  -filter_complex "[0:v]bwdif=…:deint=interlaced,split=4[s0][s1][s2][s3];
+                   [s0]scale=-2:1080,format=yuv420p[v0]; …
+                   [s3]fps=fps=source_fps/ceil(source_fps/30),
+                       scale=-2:360,format=yuv420p[v3]"            # 2. decode once, scale 4 ways
   -map [v0] -map 0:a:0 -map [v1] -map 0:a:0 …                      #    each rendition = 1 video + 1 audio
   -c:v libx264 -preset veryfast -profile:v high
   -force_key_frames "expr:gte(t,n_forced*4)"
-  -g 120 -keyint_min 120 -sc_threshold 0                           # 3. a keyframe exactly every 4s
+  -g:v:0 120 -keyint_min:v:0 120 … -sc_threshold 0                 # 3. a keyframe exactly every 4s
   -b:v:0 5000k -maxrate:v:0 5350k -bufsize:v:0 7500k …             # 4. bitrate per rendition
+  -af aresample=async=1:first_pts=0                                #    fill audio gaps with silence
   -c:a aac -ar 48000 -ac 2 -b:a:0 128k …
   -f hls -hls_time 4 -hls_segment_type mpegts                      # 5. cut into 4s segments
   -hls_segment_filename var/hls/loop/%v/seg_<run>_%05d.ts       #    <run> is unique per ffmpeg run
@@ -208,10 +210,21 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
 | srt | `-i srt://0.0.0.0:<port>?mode=listener[&passphrase=…&pbkeylen=16]` | ffmpeg waits for an SRT caller. With a passphrase, the stream is AES-encrypted and callers without the passphrase are refused. |
 
 **2. The ABR ladder.**
-- **Decode once.** `split` copies the decoded picture N times, and each copy is `scale`d to its rung's height.
-  - `-2` keeps the aspect ratio and rounds the width to an even number, which H.264 requires.
+- **Deinterlace.** `bwdif` turns interlaced video (1080i from broadcast cameras and hardware SRT encoders) into
+  progressive frames at the same frame rate. With `deint=interlaced` it only touches frames flagged as interlaced.
+  Progressive frames pass through bit-identical, so it runs on every source, including push sources nobody could
+  probe.
+- **Decode once.** `split` copies the decoded picture N times, and each copy is `scale`d to its rung's size.
+  - A rung's `height` is the picture's **short side**. Landscape is scaled to that height (`scale=-2:720`), and
+    portrait to that width (`scale=720:-2`, giving 720×1280).
+  - `-2` keeps the aspect ratio and rounds the other side to an even number, which H.264 requires.
   - `format=yuv420p` is the pixel format every player supports.
-- **Rungs taller than the source are dropped.** This is decided from the ffprobe result, so a 720p source yields only
+- **Portrait and rotated video.** Phones often store video landscape with a "rotate 90°" flag, and ffmpeg turns the
+  frames while decoding. The probe applies the flag too, so a phone clip counts as 1080×1920 portrait.
+- **Frame-rate cap.** A rung with `maxFps` divides the source frame rate by the smallest whole number that brings
+  it under the cap: 60 → 30, 59.94 → 29.97, 50 → 25, and 29.97 stays as it is. Even cadence means no judder. The
+  default ladder caps 480p and 360p at 30. At those bitrates, 60 fps mostly spends bits on frames nobody sees.
+- **Rungs bigger than the source are dropped.** This is decided from the ffprobe result, so a 720p source yields only
   720p and below.
   - Push inputs can't be probed before a publisher connects, so they always get the full ladder.
   - If the source is smaller than every rung, there is one rendition at the source height.
@@ -224,8 +237,10 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
     segment *N* of 1080p. Otherwise the picture jumps.
 - **How the command enforces it.**
   - `-force_key_frames` puts a keyframe at 0s, 4s, 8s, … in every rendition.
-  - `-g` caps the gap between keyframes: frame rate × 4 when the frame rate is known, otherwise 240 frames (which
-    assumes at most 60 fps), so the cap never fires before the forced keyframe.
+  - `-g` caps the gap between keyframes: the rung's frame rate × 4 when the frame rate is known, otherwise 240 frames
+    (which assumes at most 60 fps), so the cap never fires before the forced keyframe. It is set per rung
+    (`-g:v:<n>`), because a capped rung has fewer frames per segment. The forced keyframes are time-based, so capped
+    and uncapped rungs still cut at the same instants.
   - `-sc_threshold 0` turns off x264's extra keyframes on scene cuts. Those would land differently in each rendition.
 
 **4. Bitrate.**

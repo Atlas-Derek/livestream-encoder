@@ -27,6 +27,17 @@ describe('parseProbeOutput', () => {
     assert.deepEqual(result, { width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', durationSec: 60 });
   });
 
+  it('reports the displayed size of rotated phone video', () => {
+    // As ffprobe 9 reports a clip stored at 1920x1080 with a 90° display matrix.
+    const result = parseProbeOutput({
+      streams: [{ codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080, side_data_list: [{ rotation: 90 }] }],
+    });
+    assert.equal(result.width, 1080);
+    assert.equal(result.height, 1920);
+    const upsideDown = parseProbeOutput({ streams: [{ codec_type: 'video', width: 1920, height: 1080, side_data_list: [{ rotation: -180 }] }] });
+    assert.equal(upsideDown.width, 1920);
+  });
+
   it('reports no duration for a live source', () => {
     assert.equal(parseProbeOutput({ streams: [], format: { format_name: 'hls' } }).durationSec, null);
   });

@@ -37,6 +37,12 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   - A listener exits 0 when the publisher disconnects; the supervisor re-arms it.
   - A custom `-hls_fmp4_init_filename` must contain `%v` when there are several variants (it expands to the variant
     name). With a single variant, `%v` is left as a literal `%v`, so it is only added for several.
+  - `bwdif=…:deint=interlaced` leaves progressive frames bit-identical, so it runs on every source.
+  - ffprobe reports a rotated phone clip's stored size (1920x1080 + rotation 90); ffmpeg decodes it turned
+    (1080x1920). `parseProbeOutput` applies the rotation so rung selection sees what the filters see.
+  - The `fps` filter takes `source_fps` in its expression, which keeps the cap working for unprobed push sources.
+  - Audio stays muxed into each rendition. A shared audio group would save ~2% CPU (4 AAC encodes cost 1.4s per
+    minute against 52s for the video ladder) at the cost of an extra playlist players must sync. Not worth it.
   - ffmpeg's live playlists are wrong after a restart: it never writes `EXT-X-DISCONTINUITY-SEQUENCE`, and with fMP4
     plus `append_list` one `EXT-X-MAP` (its own run's) covers every segment, earlier runs' included.
 

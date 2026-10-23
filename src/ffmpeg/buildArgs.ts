@@ -34,6 +34,18 @@ export const PASSTHROUGH_VARIANT = 'source';
 /** Assumes push sources run at most this fast when sizing the GOP without a known frame rate. */
 const MAX_ASSUMED_FPS = 60;
 
+/**
+ * Deinterlaces only frames flagged as interlaced (1080i from broadcast gear and hardware SRT encoders), keeping the
+ * frame rate. Progressive frames pass through bit-identical, so it is safe on push sources nobody could probe.
+ */
+const DEINTERLACE = 'bwdif=mode=send_frame:parity=auto:deint=interlaced';
+
+/**
+ * Fills audio timestamp gaps (dropped packets from OBS or the network) with silence and trims overlaps, so audio
+ * doesn't drift ahead of video after a gap. first_pts=0 pads audio that starts after the video.
+ */
+const AUDIO_SYNC = 'aresample=async=1:first_pts=0';
+
 // append_list continues media sequence numbers from the existing playlist after a restart and inserts the
 // EXT-X-DISCONTINUITY itself. Don't add discont_start (duplicates the tag) or an epoch start number (with
 // append_list it renumbers already-published segments, which the HLS spec forbids).
@@ -57,15 +69,23 @@ export function redactSecrets(text: string): string {
     .replace(/(\/\/[^:/@\s]+):[^@/\s]*@/g, '$1:********@');
 }
 
-/** Drops rungs taller than the source so nothing is upscaled. */
-export function selectRungs(ladder: Rung[], sourceHeight: number | null): Rung[] {
+/** Drops rungs bigger than the source so nothing is upscaled. Rung heights are the picture's short side. */
+export function selectRungs(ladder: Rung[], sourceShortSide: number | null): Rung[] {
   if (ladder.length === 0) throw new AppError('ladder must contain at least one rung', 422);
-  if (sourceHeight === null) return ladder;
-  const fitting = ladder.filter((rung) => rung.height <= sourceHeight);
+  if (sourceShortSide === null) return ladder;
+  const fitting = ladder.filter((rung) => rung.height <= sourceShortSide);
   if (fitting.length > 0) return fitting;
-  // Source is smaller than every rung: encode one rendition at the source height.
+  // Source is smaller than every rung: encode one rendition at the source size.
   const smallest = ladder.reduce((a, b) => (b.height < a.height ? b : a));
-  return [{ ...smallest, height: sourceHeight - (sourceHeight % 2) }];
+  return [{ ...smallest, height: sourceShortSide - (sourceShortSide % 2) }];
+}
+
+/**
+ * A rung's frame rate: the source's divided by the smallest whole number that brings it to maxFps or below, so the
+ * cadence stays even (59.94 -> 29.97, 50 -> 25, 29.97 unchanged). Matches the fps filter expression in rungFilter.
+ */
+export function rungFps(sourceFps: number, maxFps: number | undefined): number {
+  return maxFps === undefined ? sourceFps : sourceFps / Math.ceil(sourceFps / maxFps);
 }
 
 function requirePort(port: number | null, input: Input): number {
@@ -101,12 +121,17 @@ export function inputArgs(
   }
 }
 
-function gopArgs(fps: number | null, encoder: EncoderConfig): string[] {
+function gopArgs(rungs: Rung[], fps: number | null, encoder: EncoderConfig): string[] {
   const seg = encoder.segmentSeconds;
-  // Forced keyframes keep every variant cut at the same instants, which ABR switching depends on.
-  const gop = fps === null ? seg * MAX_ASSUMED_FPS : Math.round(fps * seg);
-  const args = ['-force_key_frames', `expr:gte(t,n_forced*${seg})`, '-g', String(gop)];
-  if (fps !== null) args.push('-keyint_min', String(gop));
+  // Forced keyframes keep every variant cut at the same instants, which ABR switching depends on. They are
+  // time-based, so rungs at a capped frame rate still cut where the others do.
+  const args = ['-force_key_frames', `expr:gte(t,n_forced*${seg})`];
+  rungs.forEach((rung, i) => {
+    // Per rung, since a capped rung has fewer frames per segment. Sized so it never fires before the forced keyframe.
+    const gop = fps === null ? seg * MAX_ASSUMED_FPS : Math.round(rungFps(fps, rung.maxFps) * seg);
+    args.push(`-g:v:${i}`, String(gop));
+    if (fps !== null) args.push(`-keyint_min:v:${i}`, String(gop));
+  });
   if (encoder.videoEncoder === 'libx264') args.push('-sc_threshold', '0');
   return args;
 }
@@ -117,13 +142,30 @@ function videoEncoderArgs(encoder: EncoderConfig): string[] {
     : ['-c:v', 'h264_videotoolbox', '-profile:v', 'high'];
 }
 
-function ladderArgs(rungs: Rung[], hasAudio: boolean, probe: ProbeResult | null, encoder: EncoderConfig): string[] {
+/** Optional frame-rate cap, then scaling so the short side matches the rung (width for portrait sources). */
+function rungFilter(rung: Rung, portrait: boolean): string {
+  const steps: string[] = [];
+  // source_fps is resolved by ffmpeg, so this also works for push sources whose frame rate is unknown here.
+  if (rung.maxFps !== undefined) steps.push(`fps=fps=source_fps/ceil(source_fps/${rung.maxFps})`);
+  steps.push(portrait ? `scale=${rung.height}:-2` : `scale=-2:${rung.height}`, 'format=yuv420p');
+  return steps.join(',');
+}
+
+function ladderArgs(
+  rungs: Rung[],
+  portrait: boolean,
+  hasAudio: boolean,
+  probe: ProbeResult | null,
+  encoder: EncoderConfig,
+): string[] {
+  const [only] = rungs;
+  // Deinterlace once, before the split.
   const filter =
-    rungs.length === 1
-      ? `[0:v]scale=-2:${rungs[0]?.height},format=yuv420p[v0]`
+    rungs.length === 1 && only !== undefined
+      ? `[0:v]${DEINTERLACE},${rungFilter(only, portrait)}[v0]`
       : [
-          `[0:v]split=${rungs.length}${rungs.map((_, i) => `[s${i}]`).join('')}`,
-          ...rungs.map((rung, i) => `[s${i}]scale=-2:${rung.height},format=yuv420p[v${i}]`),
+          `[0:v]${DEINTERLACE},split=${rungs.length}${rungs.map((_, i) => `[s${i}]`).join('')}`,
+          ...rungs.map((rung, i) => `[s${i}]${rungFilter(rung, portrait)}[v${i}]`),
         ].join(';');
 
   const args = ['-filter_complex', filter];
@@ -131,7 +173,7 @@ function ladderArgs(rungs: Rung[], hasAudio: boolean, probe: ProbeResult | null,
     args.push('-map', `[v${i}]`);
     if (hasAudio) args.push('-map', '0:a:0');
   });
-  args.push(...videoEncoderArgs(encoder), ...gopArgs(probe?.fps ?? null, encoder));
+  args.push(...videoEncoderArgs(encoder), ...gopArgs(rungs, probe?.fps ?? null, encoder));
   rungs.forEach((rung, i) => {
     const kbps = rung.videoBitrateKbps;
     args.push(
@@ -141,7 +183,7 @@ function ladderArgs(rungs: Rung[], hasAudio: boolean, probe: ProbeResult | null,
     );
   });
   if (hasAudio) {
-    args.push('-c:a', 'aac', '-ar', '48000', '-ac', '2');
+    args.push('-af', AUDIO_SYNC, '-c:a', 'aac', '-ar', '48000', '-ac', '2');
     rungs.forEach((rung, i) => args.push(`-b:a:${i}`, `${rung.audioBitrateKbps}k`));
   }
   return args;
@@ -198,9 +240,11 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
     variants = [PASSTHROUGH_VARIANT];
     args.push('-map', '0:v:0', ...(hasAudio ? ['-map', '0:a:0'] : []), '-c', 'copy');
   } else {
-    const rungs = selectRungs(ladder, probe?.height ?? null);
+    // Push sources can't be probed, so they are treated as landscape.
+    const portrait = probe?.width != null && probe.height != null && probe.height > probe.width;
+    const rungs = selectRungs(ladder, (portrait ? probe?.width : probe?.height) ?? null);
     variants = rungs.map((rung) => rung.name);
-    args.push(...ladderArgs(rungs, hasAudio, probe, encoder));
+    args.push(...ladderArgs(rungs, portrait, hasAudio, probe, encoder));
   }
   args.push('-max_muxing_queue_size', '1024');
 

@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 export interface ProbeResult {
+  /** As displayed: rotation metadata (phone video is often stored landscape and rotated 90°) is applied. */
   width: number | null;
   height: number | null;
   fps: number | null;
@@ -32,14 +33,23 @@ export function parseFrameRate(value: unknown): number | null {
   return Number.isFinite(den) && den > 0 ? num / den : null;
 }
 
+/** The display rotation in degrees from a stream's side data, e.g. 90 or -90 for portrait phone video. */
+function rotation(stream: Record<string, unknown> | undefined): number {
+  const sideData = Array.isArray(stream?.side_data_list) ? stream.side_data_list.filter(isRecord) : [];
+  const value = sideData.find((d) => typeof d.rotation === 'number')?.rotation;
+  return typeof value === 'number' ? value : 0;
+}
+
 export function parseProbeOutput(json: unknown): ProbeResult {
   const streams = isRecord(json) && Array.isArray(json.streams) ? json.streams.filter(isRecord) : [];
   const video = streams.find((s) => s.codec_type === 'video');
   const audio = streams.find((s) => s.codec_type === 'audio');
   const format = isRecord(json) && isRecord(json.format) ? json.format : null;
+  // ffprobe reports the stored size, but ffmpeg rotates frames while decoding, so the filters see them turned.
+  const turned = Math.abs(rotation(video)) % 180 === 90;
   return {
-    width: positiveNumber(video?.width),
-    height: positiveNumber(video?.height),
+    width: positiveNumber(turned ? video?.height : video?.width),
+    height: positiveNumber(turned ? video?.width : video?.height),
     fps: parseFrameRate(video?.avg_frame_rate) ?? parseFrameRate(video?.r_frame_rate),
     videoCodec: typeof video?.codec_name === 'string' ? video.codec_name : null,
     audioCodec: typeof audio?.codec_name === 'string' ? audio.codec_name : null,

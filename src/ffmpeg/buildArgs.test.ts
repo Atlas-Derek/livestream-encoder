@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { ChannelSpecSchema, type Rung } from '../channels/schema.ts';
 import { AppError } from '../errors.ts';
-import { buildArgs, inputArgs, redactSecrets, selectRungs, type EncoderConfig } from './buildArgs.ts';
+import { buildArgs, inputArgs, redactSecrets, rungFps, selectRungs, type EncoderConfig } from './buildArgs.ts';
 import type { ProbeResult } from './probe.ts';
 
 const LADDER: Rung[] = [
@@ -36,6 +36,17 @@ describe('selectRungs', () => {
 
   it('falls back to one rendition at source height when the source is smaller than every rung', () => {
     assert.deepEqual(selectRungs(LADDER, 241), [{ ...LADDER[2], height: 240 }]);
+  });
+});
+
+describe('rungFps', () => {
+  it('divides by a whole number so the cadence stays even', () => {
+    assert.equal(rungFps(60, 30), 30);
+    assert.ok(Math.abs(rungFps(59.94, 30) - 29.97) < 0.001);
+    assert.equal(rungFps(50, 30), 25);
+    assert.ok(Math.abs(rungFps(29.97, 30) - 29.97) < 0.001);
+    assert.equal(rungFps(120, 30), 30);
+    assert.equal(rungFps(60, undefined), 60);
   });
 });
 
@@ -96,14 +107,17 @@ describe('buildArgs', () => {
       '-hide_banner', '-nostdin', '-loglevel', 'warning', '-nostats', '-progress', 'pipe:1', '-y',
       '-i', '/m/a.mp4',
       '-filter_complex',
-      '[0:v]split=3[s0][s1][s2];[s0]scale=-2:1080,format=yuv420p[v0];[s1]scale=-2:720,format=yuv420p[v1];[s2]scale=-2:360,format=yuv420p[v2]',
+      '[0:v]bwdif=mode=send_frame:parity=auto:deint=interlaced,split=3[s0][s1][s2];' +
+        '[s0]scale=-2:1080,format=yuv420p[v0];[s1]scale=-2:720,format=yuv420p[v1];[s2]scale=-2:360,format=yuv420p[v2]',
       '-map', '[v0]', '-map', '0:a:0', '-map', '[v1]', '-map', '0:a:0', '-map', '[v2]', '-map', '0:a:0',
       '-c:v', 'libx264', '-preset', 'veryfast', '-profile:v', 'high',
-      '-force_key_frames', 'expr:gte(t,n_forced*4)', '-g', '120', '-keyint_min', '120', '-sc_threshold', '0',
+      '-force_key_frames', 'expr:gte(t,n_forced*4)',
+      '-g:v:0', '120', '-keyint_min:v:0', '120', '-g:v:1', '120', '-keyint_min:v:1', '120', '-g:v:2', '120', '-keyint_min:v:2', '120',
+      '-sc_threshold', '0',
       '-b:v:0', '5000k', '-maxrate:v:0', '5350k', '-bufsize:v:0', '7500k',
       '-b:v:1', '2800k', '-maxrate:v:1', '2996k', '-bufsize:v:1', '4200k',
       '-b:v:2', '800k', '-maxrate:v:2', '856k', '-bufsize:v:2', '1200k',
-      '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a:0', '128k', '-b:a:1', '128k', '-b:a:2', '96k',
+      '-af', 'aresample=async=1:first_pts=0', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a:0', '128k', '-b:a:1', '128k', '-b:a:2', '96k',
       '-max_muxing_queue_size', '1024',
       '-f', 'hls', '-hls_time', '4', '-hls_segment_type', 'mpegts',
       '-hls_segment_filename', '/hls/ch/%v/seg_r1_%05d.ts',
@@ -144,8 +158,8 @@ describe('buildArgs', () => {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 1935, probe: null, encoder: ENCODER,
     });
     assert.deepEqual(variants, ['1080p', '720p', '360p']);
-    assert.equal(valueOf(args, '-g'), '240');
-    assert.equal(args.includes('-keyint_min'), false);
+    assert.equal(valueOf(args, '-g:v:0'), '240');
+    assert.equal(args.some((arg) => arg.startsWith('-keyint_min')), false);
     assert.equal(valueOf(args, '-force_key_frames'), 'expr:gte(t,n_forced*4)');
   });
 
@@ -154,6 +168,40 @@ describe('buildArgs', () => {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
     });
     assert.equal(valueOf(args, '-i'), 'srt://0.0.0.0:9000?mode=listener');
+  });
+
+  it('scales portrait sources by width and picks rungs by the short side', () => {
+    const { variants, args } = buildArgs(spec({ type: 'file', path: '/m/phone.mov' }, { mode: 'vod' }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, width: 1080, height: 1920 }, encoder: ENCODER,
+    });
+    assert.deepEqual(variants, ['1080p', '720p', '360p']);
+    assert.match(valueOf(args, '-filter_complex') ?? '', /\[s0\]scale=1080:-2,.*\[s1\]scale=720:-2,.*\[s2\]scale=360:-2,/);
+  });
+
+  it('caps the frame rate of rungs with maxFps and sizes their GOP to match', () => {
+    const ladder: Rung[] = [LADDER[0] as Rung, { ...(LADDER[2] as Rung), maxFps: 30 }];
+    const { args } = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod' }), {
+      outDir: '/hls/ch', runId: 'r1', ladder, port: null, probe: { ...PROBE_1080, fps: 60 }, encoder: ENCODER,
+    });
+    const filter = valueOf(args, '-filter_complex') ?? '';
+    assert.match(filter, /\[s1\]fps=fps=source_fps\/ceil\(source_fps\/30\),scale=-2:360/);
+    assert.doesNotMatch(filter, /\[s0\]fps/);
+    assert.equal(valueOf(args, '-g:v:0'), '240'); // 60 fps x 4s
+    assert.equal(valueOf(args, '-g:v:1'), '120'); // 30 fps x 4s
+    assert.equal(valueOf(args, '-keyint_min:v:1'), '120');
+  });
+
+  it('deinterlaces before scaling and keeps audio in sync, but not in passthrough', () => {
+    const { args } = buildArgs(spec({ type: 'srt' }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
+    });
+    assert.match(valueOf(args, '-filter_complex') ?? '', /^\[0:v\]bwdif=mode=send_frame:parity=auto:deint=interlaced,split=3/);
+    assert.equal(valueOf(args, '-af'), 'aresample=async=1:first_pts=0');
+
+    const copy = buildArgs(spec({ type: 'srt' }, { passthrough: true }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
+    });
+    assert.equal(copy.args.includes('-af'), false);
   });
 
   it('leaves audio out of a push channel declared video-only', () => {
