@@ -83,4 +83,10 @@ async function main(): Promise<number> {
   }
 }
 
-process.exitCode = await main();
+try {
+  process.exitCode = await main();
+} catch (err) {
+  // A missing or unreachable playlist is a finding, not a crash: one line and a failing exit code.
+  console.error(`check failed: ${err instanceof Error ? err.message : String(err)}`);
+  process.exitCode = 1;
+}
