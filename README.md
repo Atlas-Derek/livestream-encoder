@@ -299,11 +299,13 @@ Three programs cooperate, and **they only share files on disk**:
 - **ffmpeg does all the media work.** It receives or reads the input, decodes it, encodes every rendition, cuts the
   output into segments and writes the playlists.
 - **The Node app never touches video data.** It works out which ffmpeg command to run, starts it, watches its
-  progress, and restarts it when it fails.
+  progress, and restarts it when it fails. One-off ffmpeg runs make the slate and seek thumbnails.
 - **For live channels, the Node app republishes ffmpeg's playlists.** ffmpeg's own live playlists are wrong after a
   restart, so it writes private copies, and the app rewrites them into the ones players fetch (see
-  [Publishing live playlists](#publishing-live-playlists)).
-- **nginx is a plain static file server.** It serves the playlists and segments, with the right headers.
+  [Publishing live playlists](#publishing-live-playlists)). The same step splices in the slate while a source is down
+  and hard-links segments into recordings.
+- **nginx is a static file server.** It serves the playlists and segments with the right headers, and with
+  `PLAYBACK_SECRET` it also checks each request's signature.
 - **The player** (hls.js or Safari) downloads those files over HTTP and plays them.
 
 | File | Responsibility |
@@ -312,23 +314,32 @@ Three programs cooperate, and **they only share files on disk**:
 | [src/config.ts](src/config.ts) | Turns environment variables into a typed `Config` with defaults. |
 | [src/api/routes.ts](src/api/routes.ts) | The HTTP endpoints. Validates request bodies and maps errors to status codes. |
 | [src/channels/schema.ts](src/channels/schema.ts) | zod schemas that define what a valid channel looks like. |
-| [src/channels/manager.ts](src/channels/manager.ts) | The registry of channels. Allocates ports, saves channels to disk, creates one supervisor per channel, and prepares each ffmpeg run. |
+| [src/channels/manager.ts](src/channels/manager.ts) | The registry of channels. Allocates ports, saves channels to disk, creates one supervisor per channel, and prepares each ffmpeg run (probe, output folder, slate, AES key). Finishes VOD encodes, turns recording on and off, and signs playback URLs. |
 | [src/ffmpeg/buildArgs.ts](src/ffmpeg/buildArgs.ts) | A pure function that turns a channel spec into the ffmpeg argument list. |
 | [src/ffmpeg/probe.ts](src/ffmpeg/probe.ts) | Runs ffprobe to learn a source's resolution, frame rate and codecs. |
 | [src/ffmpeg/supervisor.ts](src/ffmpeg/supervisor.ts) | The lifecycle of one ffmpeg process: spawn, progress, watchdog, restarts. |
 | [src/channels/output.ts](src/channels/output.ts) | Gets a channel's output folder ready before each run and cleans up leftovers. |
-| [src/hls/playlist.ts](src/hls/playlist.ts) | Pure functions that turn ffmpeg's live playlists into the ones players fetch. |
-| [src/hls/publisher.ts](src/hls/publisher.ts) | Keeps a live channel's published playlists in step with ffmpeg's while it runs. |
+| [src/hls/playlist.ts](src/hls/playlist.ts) | Pure functions that turn ffmpeg's live playlists into the ones players fetch, append slate segments, and order and parse master playlists. |
+| [src/hls/publisher.ts](src/hls/publisher.ts) | Keeps a live channel's published playlists in step with ffmpeg's while it runs, adds the slate while the source is down, and hands new segments to the recorder. |
+| [src/hls/codecs.ts](src/hls/codecs.ts) | Adds the `CODECS` and `FRAME-RATE` ffmpeg leaves out of master playlists, from each rendition's first segment. |
+| [src/hls/recorder.ts](src/hls/recorder.ts) | Live-to-VOD recordings: hard links, EVENT then VOD playlists, listing and deleting. |
+| [src/hls/thumbnails.ts](src/hls/thumbnails.ts) | Seek thumbnails: sprite sheets and the WebVTT track for VOD output and recordings. |
+| [src/hls/check.ts](src/hls/check.ts), [src/tools/check-hls.ts](src/tools/check-hls.ts) | `npm run check:hls`: checks keyframe alignment, discontinuities and playlist rules, decrypting AES-128 segments. |
+| [src/api/playback.ts](src/api/playback.ts) | Signed playback URLs (the token nginx's `secure_link` checks). |
+| [src/api/metrics.ts](src/api/metrics.ts) | `GET /metrics` in Prometheus's text format. |
+| [src/notify/webhooks.ts](src/notify/webhooks.ts) | Posts channel and recording events to `WEBHOOK_URLS`. |
 | [src/ffmpeg/pids.ts](src/ffmpeg/pids.ts) | Pid files, and killing ffmpeg processes orphaned by a crash. |
-| [nginx/nginx.conf](nginx/nginx.conf), [nginx/cors.conf](nginx/cors.conf) | Serves `var/hls` with the correct MIME types, caching and CORS headers. |
+| [nginx/nginx.conf](nginx/nginx.conf), [nginx/cors.conf](nginx/cors.conf), [scripts/nginx.sh](scripts/nginx.sh) | Serves `var/hls` with the correct MIME types, caching and CORS headers, and only signed URLs when `PLAYBACK_SECRET` is set. |
 
 ### What happens when you create a channel
 
 1. **Validation.** `POST /channels` parses the body with `ChannelSpecSchema`.
    - The `id` must be a lowercase slug. It is also the output folder name.
    - `input` must be one of `file`, `pull`, `rtmp` or `srt`, each with its own fields.
-   - Defaults are filled in: `mode: live`, `segmentType: mpegts`, `passthrough: false`.
-   - `vod` is only allowed for a file that doesn't loop.
+   - Defaults are filled in: `mode: live`, `segmentType: mpegts`, `passthrough: false`, and `false` for `record`,
+     `encrypt` and `thumbnails`.
+   - Combinations that can't work are refused: `vod` with anything but a file that doesn't loop, recording or a DVR
+     window on VOD, encryption with fMP4, a ladder or overlay with passthrough.
    - An invalid body gets a `400` listing exactly which fields are wrong.
 2. **Registration.** `ChannelManager.create`:
    - Rejects a duplicate id with `409`.
@@ -339,41 +350,50 @@ Three programs cooperate, and **they only share files on disk**:
 3. **Preparation.** This happens before *every* ffmpeg start, including restarts, so it always reflects the source as
    it is now.
    - File inputs: the path is resolved against the repo root, and the file must exist.
-   - File and pull inputs: ffprobe reads the source's width, height, frame rate and codecs.
+   - File and pull inputs: ffprobe reads the source's width, height, frame rate, codecs and color (matrix and HDR
+     transfer).
    - `buildArgs` produces the ffmpeg command.
-   - `prepareOutputDir` gets `var/hls/<id>/` ready (see [The output folder](#the-output-folder)).
+   - `prepareOutputDir` gets `var/hls/<id>/` ready, or for VOD the hidden `var/hls/.building-<id>/` the encode goes
+     into (see [The output folder](#the-output-folder)).
+   - Encrypted channels get a new AES key for the run.
+   - Live channels with a ladder get their slate rendered, unless it already is.
    - If anything here fails (missing file, unreachable URL), it counts as a failed run, just like an ffmpeg crash.
 4. **Spawn.** ffmpeg is started with an argument array, never through a shell, so stream keys and URLs can't be
    misread as shell syntax. ffmpeg's stdout carries machine-readable progress, and stderr carries its log.
 
 ### Inside the ffmpeg command
 
-This is the command for a looping file played out as a live channel, abridged and annotated:
+This is the command for a looping 1080p file played out as a live channel, abridged and annotated:
 
 ```
 ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
   -re -stream_loop -1 -i media/sample.mp4                          # 1. input
-  -filter_complex "[0:v]bwdif=…:deint=interlaced,split=4[s0][s1][s2][s3];
-                   [s0]scale=-2:1080,format=yuv420p[v0]; …
-                   [s3]fps=fps=source_fps/ceil(source_fps/30),
-                       scale=-2:360,format=yuv420p[v3];
+  -filter_complex "[0:v]bwdif=…:deint=interlaced,split=5[s0][s1][s2][s3][s4];
+                   [s0]scale=-2:1080:in_color_matrix=bt709:out_color_matrix=bt709:out_range=tv,
+                       format=yuv420p[v0]; …
+                   [s4]fps=fps=source_fps/ceil(source_fps/30),
+                       scale=-2:240:…,format=yuv420p[v4];
                    [0:a]aresample=async=1:first_pts=0,
-                       asplit=4[a0][a1][a2][a3]"                   # 2. decode once, scale 4 ways
+                       asplit=5[a0][a1][a2][a3][a4]"               # 2. decode once, scale 5 ways
   -map [v0] -map [a0] -map [v1] -map [a1] …                        #    each rendition = 1 video + 1 audio
   -c:v libx264 -preset veryfast -profile:v high
+  -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv
   -force_key_frames "expr:gte(t,n_forced*4)"
   -g:v:0 120 -keyint_min:v:0 120 … -sc_threshold 0                 # 3. a keyframe exactly every 4s
   -b:v:0 5000k -maxrate:v:0 5350k -bufsize:v:0 7500k …             # 4. bitrate per rendition
   -c:a aac -ar 48000 -ac 2 -b:a:0 128k …
   -f hls -hls_time 4 -hls_segment_type mpegts                      # 5. cut into 4s segments
-  -hls_segment_filename var/hls/loop/%v/seg_<run>_%05d.ts       #    <run> is unique per ffmpeg run
+  -hls_segment_filename var/hls/loop/%v/seg_<run>_%05d.ts          #    <run> is unique per ffmpeg run
   -master_pl_name ffmpeg-master.m3u8
-  -var_stream_map "v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p v:3,a:3,name:360p"
+  -var_stream_map "v:0,a:0,name:1080p v:1,a:1,name:720p … v:4,a:4,name:240p"
   -hls_list_size 6 -hls_delete_threshold 7
   -hls_flags delete_segments+independent_segments+temp_file+program_date_time+append_list+omit_endlist
   var/hls/loop/%v/ffmpeg.m3u8                                      # %v becomes the rendition name; the app
                                                                    #   publishes these as master.m3u8/index.m3u8
 ```
+
+An encrypted channel adds `-hls_key_info_file var/keys/<id>.keyinfo` (see
+[Signed playback URLs](#signed-playback-urls)).
 
 **1. Input.** This is the only part that differs between input types:
 
@@ -381,9 +401,9 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
 |---|---|---|
 | file, live | `-re [-stream_loop -1] -i <path>` | `-re` reads at real-time speed, so a 60s file takes 60s, like a broadcast. `-stream_loop -1` repeats it forever. |
 | file, vod | `-i <path>` | No `-re`: encodes as fast as the CPU allows. |
-| pull | `[-re] -rw_timeout 10000000 -i <url>` (RTSP: `-rtsp_transport tcp -timeout …`) | ffmpeg connects out to the source. The timeout makes a dead source fail within 10s instead of hanging. `-re` is added when ffprobe reports a duration, meaning a finite source such as an HTTP file or a VOD playlist. Otherwise ffmpeg would read it hundreds of times faster than real time and race through the live window. |
+| pull | `[-re] -rw_timeout 10000000 [-reconnect 1 …] -i <url>` (RTSP: `-rtsp_transport tcp -timeout …`) | ffmpeg connects out to the source. The timeout makes a dead source fail within 10s instead of hanging. HTTP(S) sources also get `-reconnect`, so a dropped connection resumes where it broke off. `-re` is added when ffprobe reports a duration, meaning a finite source such as an HTTP file or a VOD playlist. Otherwise ffmpeg would read it hundreds of times faster than real time and race through the live window. |
 | rtmp | `-listen 1 -i rtmp://0.0.0.0:<port>/live/<key>` | ffmpeg *becomes* an RTMP server and waits until a publisher such as OBS connects. |
-| srt | `-i srt://0.0.0.0:<port>?mode=listener[&passphrase=…&pbkeylen=16]` | ffmpeg waits for an SRT caller. With a passphrase, the stream is AES-encrypted and callers without the passphrase are refused. |
+| srt | `-i srt://0.0.0.0:<port>?mode=listener&latency=<µs>[&passphrase=…&pbkeylen=16]` | ffmpeg waits for an SRT caller. `latency` (`latencyMs`, 1000 by default) is how long SRT may wait for lost packets to be resent. With a passphrase, the stream is AES-encrypted and callers without the passphrase are refused. |
 
 **2. The ABR ladder.**
 - **Deinterlace.** `bwdif` turns interlaced video (1080i from broadcast cameras and hardware SRT encoders) into
@@ -395,6 +415,13 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
     portrait to that width (`scale=720:-2`, giving 720×1280).
   - `-2` keeps the aspect ratio and rounds the other side to an even number, which H.264 requires.
   - `format=yuv420p` is the pixel format every player supports.
+- **Color.** Every rendition is SDR BT.709 in limited range, tagged as such, which every player shows correctly.
+  - `scale` converts each source's YUV matrix to BT.709. The input matrix is always given: `scale` assumes BT.601 for
+    an untagged source, which shifted colors. It comes from the source's tag, or, untagged, BT.709 from 720 lines up
+    and BT.601 below, as players assume.
+  - HDR sources (PQ, or HLG as most phones record) are tone mapped to SDR once, before the split: zscale to linear
+    light at 203 nits reference white, `tonemap=mobius`, back to BT.709. Without it they looked washed out.
+  - Push sources can't be probed, so their color is left as the publisher tagged it.
 - **Portrait and rotated video.** Phones often store video landscape with a "rotate 90°" flag, and ffmpeg turns the
   frames while decoding. The probe applies the flag too, so a phone clip counts as 1080×1920 portrait.
 - **Frame-rate cap.** A rung with `maxFps` divides the source frame rate by the smallest whole number that brings
@@ -474,6 +501,7 @@ The app finishes ffmpeg's master playlist (live ones when they are published, VO
 #EXT-X-INDEPENDENT-SEGMENTS
 #EXT-X-MEDIA-SEQUENCE:9                         ← sequence number of the first segment listed
 #EXT-X-DISCONTINUITY-SEQUENCE:3                 ← discontinuities that have already left the window
+## source-sequence:14                           ← the last of ffmpeg's segments published (a comment)
 #EXTINF:4.000000,
 #EXT-X-PROGRAM-DATE-TIME:2026-10-20T14:40:22.928-0600
 seg_mvl0a1b2_00009.ts
@@ -494,8 +522,8 @@ The live flags, and what each one is for:
 | `temp_file` | Writes each playlist and segment as `.tmp`, then renames it. nginx never serves a half-written file. |
 | `program_date_time` | Stamps each segment with wall-clock time. Players use it to stay in sync across discontinuities. |
 | `independent_segments` | Promises that every segment starts with a keyframe (see keyframe alignment). |
-| `omit_endlist` | Never writes `#EXT-X-ENDLIST`. When a publisher disconnects, players keep polling instead of deciding the stream is over, and pick up again on reconnect. |
-| `append_list` | When ffmpeg restarts, it reads the existing playlist and continues the numbering (segment 10 follows segment 9), inserting `#EXT-X-DISCONTINUITY` so the player resets its timestamps. Without it, a restart would start again at segment 0 and confuse players that were watching. |
+| `omit_endlist` | Never writes `#EXT-X-ENDLIST`. When a publisher disconnects, players keep polling instead of deciding the stream is over: they get the slate, then the live picture again on reconnect. |
+| `append_list` | When ffmpeg restarts, it reads its existing playlist and continues the numbering (segment 10 follows segment 9). The publisher relies on that to tell which segments are new. |
 
 Two other modes:
 - **Passthrough** (`-c copy`): no re-encoding. The source's own video and audio are repackaged as a single rendition
@@ -540,7 +568,13 @@ them every 250 ms into the `master.m3u8` and `<rung>/index.m3u8` that players fe
 - It writes atomically (`.tmp`, then rename). It publishes once more after ffmpeg exits, so the final segments are
   announced.
 - The published playlist is an append log with its own window and sequence numbers: ffmpeg's segments are appended
-  as they appear, and a comment (`## source-sequence:41`, ignored by players) records the last one published.
+  as they appear, and a comment (`## source-sequence:41`, ignored by players) records the last one published. The
+  window is `LIVE_LIST_SIZE` segments, or longer with `dvrWindowSeconds`.
+- Encrypted channels: each segment keeps its own run's `#EXT-X-KEY`, as with init sections.
+- The master playlist is finished the same way: `CODECS` and `FRAME-RATE` added, the start rendition listed first.
+
+nginx returns 404 for `ffmpeg*.m3u8`. VOD output is a single run, so ffmpeg writes `master.m3u8` and `index.m3u8`
+directly, and the app finishes the master once the encode completes.
 
 **The slate.** When a publisher disconnects or ffmpeg restarts, ffmpeg's playlist stops growing, and players stall
 and give up after a while. Instead, the publisher appends a "Be right back" segment each time the newest segment has
@@ -573,9 +607,6 @@ recording. On-demand recording stays on across API restarts until stopped, and t
 - Recordings are kept until deleted, with the channel or with `DELETE /channels/:id/recordings/:recording`. They
   take as much disk as the stream's bitrate: about 5 GB an hour for the default ladder (10.9 Mbps across its renditions).
 
-nginx returns 404 for `ffmpeg*.m3u8`. VOD output is a single run, so ffmpeg writes `master.m3u8` and `index.m3u8`
-directly.
-
 ### The supervisor: keeping ffmpeg alive
 
 Each channel has one `Supervisor`, which runs this state machine:
@@ -590,6 +621,8 @@ Each channel has one `Supervisor`, which runs this state machine:
 
  any state ──stop──▶ stopping ──▶ stopped
 ```
+
+While a live channel is `starting`, `restarting` or `waiting_for_publisher`, its players get the slate.
 
 **How it knows what ffmpeg is doing.**
 - **Progress.** `-progress pipe:1` makes ffmpeg print a block of `key=value` lines about twice a second: `frame`,
@@ -644,39 +677,50 @@ Each channel has one `Supervisor`, which runs this state machine:
 
 ```
 var/hls/<id>/
-├── master.m3u8          ← the URL you give a player
-├── ffmpeg-master.m3u8   ← live only: ffmpeg's copy, published as master.m3u8
+├── master.m3u8               ← the URL you give a player
+├── ffmpeg-master.m3u8        ← live only: ffmpeg's copy, published as master.m3u8
+├── key_<run>.key             ← encrypted channels: one AES key per run
+├── thumbnails.vtt            ← VOD with thumbnails: seek track, and its sheets thumb_<id>_<n>.jpg
 ├── 1080p/
-│   ├── index.m3u8       ← variant playlist
-│   ├── ffmpeg.m3u8      ← live only: ffmpeg's copy, published as index.m3u8
+│   ├── index.m3u8            ← variant playlist
+│   ├── ffmpeg.m3u8           ← live only: ffmpeg's copy, published as index.m3u8
 │   ├── init_<run>_1080p.mp4  ← fMP4 only
 │   ├── seg_<run>_00009.ts
-│   └── seg_<run>_00010.ts
+│   ├── seg_<run>_00010.ts
+│   ├── slate.m3u8            ← live only: the pre-rendered slate,
+│   └── slate_<id>_000.ts …   ←   000 to 007
 ├── 720p/ …
-└── 360p/ …
+└── recordings/<start time>/  ← recordings: master.m3u8, <rung>/index.m3u8, hard-linked segments, the key, thumbnails
+
+var/hls/.building-<id>/       ← VOD: the encode in progress, swapped in for var/hls/<id>/ when it completes
+var/keys/<id>.keyinfo         ← encrypted channels: ffmpeg's key info file, outside what nginx serves
 ```
 
 Before each run, `prepareOutputDir` does one of two things:
-- **VOD:** wipes the folder and starts fresh.
+- **VOD:** wipes `.building-<id>` and starts fresh there. The served folder is untouched until the encode
+  completes, then the finished master, thumbnails included, replaces it (two renames).
 - **Live:** keeps the existing playlists, so `append_list` can continue them, but:
-  - deletes rendition folders that are no longer in the ladder,
+  - deletes rendition folders that are no longer in the ladder (never `recordings/`),
   - deletes leftover `.tmp` files, and
-  - deletes segments and init sections that neither `ffmpeg.m3u8` nor the published `index.m3u8` references.
+  - deletes segments, init sections and keys that neither `ffmpeg.m3u8` nor the published `index.m3u8` references,
+    once they are older than the published window plus one segment, as the HLS spec requires.
 
 The last step is needed because `delete_segments` only cleans up within a single ffmpeg run, so restarts and crashes
 leave stray segments behind. Both playlists count because only the published one still lists earlier runs' init
 sections. Output from before live playlists were published only has an `index.m3u8`, written by ffmpeg. It is copied
-to `ffmpeg.m3u8` once, so numbering carries on instead of restarting at 0.
+to `ffmpeg.m3u8` once, so numbering carries on instead of restarting at 0. Slate files are replaced only when the
+renditions change, and older renders are removed once no published playlist lists them.
 
 ### Persistence and crash recovery
 
 **Saved channels.**
-- `var/channels.json` holds every channel's spec, assigned port, desired state (`running` or `stopped`), and when a
-  VOD encode completed.
+- `var/channels.json` holds every channel's spec, assigned port, desired state (`running` or `stopped`), when a
+  VOD encode completed, and whether recording was started on demand.
 - Writes are serialized and atomic: written to a `.tmp` file, then renamed, so a crash can't leave a half-written file.
 - On startup:
   - Channels that should be running are started again.
   - Completed VOD encodes are not redone.
+  - Recordings left open by a crash are closed (made VOD).
   - If the file is invalid, the app refuses to start rather than silently dropping channels.
 - `POST /channels/:id/stop` sets the desired state to `stopped`. Ctrl+C does not change it, so channels come back on
   the next start.
@@ -690,22 +734,27 @@ to `ffmpeg.m3u8` once, so numbering carries on instead of restarting at 0.
 
 **Graceful shutdown.** On Ctrl+C or SIGTERM, the app:
 1. stops accepting API requests,
-2. stops every ffmpeg cleanly,
-3. waits for pending file writes,
-4. exits.
+2. stops every ffmpeg cleanly, which closes open recordings,
+3. waits for pending file writes and finishing work (a VOD's master and swap, thumbnails),
+4. waits up to 5s for webhooks still queued,
+5. exits.
 
 ### Serving: nginx
 
-`npm run nginx` runs `nginx -p "$PWD" -c nginx/nginx.conf`. The `-p` sets the repo root as nginx's prefix, so every
-relative path in the config (logs, pid, `var/hls`) stays inside the repo, and Homebrew's own nginx config is never
-touched.
+`npm run nginx` runs `scripts/nginx.sh`, which writes `var/nginx/playback.conf` from `PLAYBACK_SECRET` (nginx
+won't start without it) and then runs `nginx -p "$PWD" -c nginx/nginx.conf`. The `-p` sets the repo root as nginx's
+prefix, so every relative path in the config (logs, pid, `var/hls`) stays inside the repo, and Homebrew's own nginx
+config is never touched.
 
 | Location | What it does |
 |---|---|
-| `/hls/` | Serves files from `var/hls`. MIME types: `.m3u8` → `application/vnd.apple.mpegurl`, `.ts` → `video/mp2t`, `.m4s` and `.mp4` → `video/mp4`. |
+| `/hls/` | Serves files from `var/hls`. MIME types: `.m3u8` → `application/vnd.apple.mpegurl`, `.ts` → `video/mp2t`, `.m4s` and `.mp4` → `video/mp4`, `.vtt` → `text/vtt`, `.jpg` → `image/jpeg`. With `PLAYBACK_SECRET`, every `/hls/` request other than a signed one gets `403`. |
+| `/hls/_s/<expires>/<token>/<channel>/…` | Signed requests (see [Signed playback URLs](#signed-playback-urls)): `secure_link` checks the token (`403`, or `410` once expired), then serves `var/hls/<channel>/…` with the same rules as below. `404` when no secret is set. |
+| `/hls/.…` | `404`. A VOD encode in progress (`.building-<id>`) or being swapped out. |
 | `ffmpeg*.m3u8` | `404`. These are ffmpeg's private live playlists. Players get the published copies. |
-| `*.m3u8` | `Cache-Control: no-cache`. Live playlists change every few seconds, so no cache may keep an old copy. |
-| `*.ts`, `*.m4s`, `*.mp4` | `Cache-Control: max-age=86400`. Segments and init sections never change once written. Their names carry a per-run id (`seg_<run>_<n>`, `init_<run>_<rung>.mp4`), so a restart, a recreated channel or a rebuilt VOD never reuses a URL a player has already cached. |
+| `*.m3u8`, `*.vtt` | `Cache-Control: no-cache`. Live playlists change every few seconds, and a thumbnails track when a VOD is rebuilt, so no cache may keep an old copy. |
+| `*.ts`, `*.m4s`, `*.mp4`, `*.jpg` | `Cache-Control: max-age=86400`. Segments, init sections and thumbnail sheets never change once written. Their names carry a per-run id (`seg_<run>_<n>`, `init_<run>_<rung>.mp4`, `thumb_<id>_<n>.jpg`), so a restart, a recreated channel or a rebuilt VOD never reuses a URL a player has already cached. |
+| `*.key` | AES keys: `Cache-Control: private, max-age=86400` when signed. |
 | `/` | The test player (`nginx/html/index.html`). |
 | `/api/` | Proxies to the Node API on :3000, so the test page can call it from the same origin. **Localhost only:** HLS is served to the whole network so other devices can play it, but the API can encode any file on disk and pull any URL. |
 
@@ -721,7 +770,8 @@ touched.
 ### What the player does
 
 1. Fetches `master.m3u8` and reads the renditions' `BANDWIDTH`, `RESOLUTION`, `CODECS` and `FRAME-RATE`.
-2. Picks a starting rendition from its bandwidth estimate and the player size, then fetches that rendition's
+2. Starts with a rendition before it can measure anything: Safari takes the first listed, which is why the app lists
+   the start rendition (720p) first; hls.js uses it as its starting hint. Then it fetches that rendition's
    `index.m3u8`.
 3. Downloads segments in order and feeds them to the browser's video decoder. hls.js uses Media Source Extensions;
    Safari plays HLS natively.
@@ -730,8 +780,10 @@ touched.
    `SEGMENT_SECONDS=2` for lower latency, at the cost of more requests. Low-Latency HLS is not implemented.
 5. Measures how fast each segment downloaded and switches rendition at the next segment boundary. This works without
    a glitch only because keyframes are aligned across renditions.
-6. On `#EXT-X-DISCONTINUITY`, resets its timestamp mapping and carries on, which is how a reconnecting publisher
-   resumes without the player failing.
+6. On `#EXT-X-DISCONTINUITY`, resets its timestamp mapping and carries on. That is how it moves from the live picture
+   to the slate and back when a publisher drops and reconnects, without failing.
+7. **Encrypted channels:** fetches the key named by `#EXT-X-KEY` (under the same signed URL) and decrypts each
+   segment before decoding it.
 
 ## Development
 
