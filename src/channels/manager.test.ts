@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -53,6 +53,8 @@ function makeManager(overrides: Partial<ManagerDeps> = {}) {
     spawn: spawner.spawn,
     killStale: async () => {},
     renderSlate: async () => {},
+    // Otherwise publishing a master runs the real ffprobe on the tests' fake segments.
+    probeStreams: async () => ({ streams: [] }),
     ...overrides,
   });
   managers.push(manager);
@@ -352,6 +354,78 @@ describe('ChannelManager', () => {
     await waitFor(() => spawner.calls.length === 4);
     assert.deepEqual(manager.get('live2').warnings, ['no slate to show while the source is down: drawtext: no font']);
     assert.equal(manager.get('live2').state, 'waiting_for_publisher', 'the channel runs without one');
+  });
+
+  it('splices in the slate while a live channel waits for its source, and stops once it runs', async () => {
+    const { manager, spawner } = makeManager();
+    await manager.init();
+    await manager.create(spec({ id: 'live', input: { type: 'srt' } }));
+    await waitFor(() => manager.get('live').state === 'waiting_for_publisher');
+
+    // Stand in for ffmpeg's last segment from an earlier publisher, and for the rendered slate.
+    const variant = path.join(config.hlsRoot, 'live', '720p');
+    await writeFile(path.join(variant, 'slate.m3u8'), '#EXTM3U\n#EXTINF:0.100,\nslate_h1_000.ts\n#EXTINF:0.100,\nslate_h1_001.ts\n#EXT-X-ENDLIST\n');
+    await writeFile(path.join(variant, 'ffmpeg.m3u8'), '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:0.100,\nseg_r1_00000.ts\n');
+    const published = path.join(variant, 'index.m3u8');
+    const slateCount = () => (existsSync(published) ? (readFileSync(published, 'utf8').match(/^slate_/gm) ?? []).length : 0);
+    await waitFor(() => slateCount() > 0);
+
+    spawner.last().progress(4);
+    await waitFor(() => manager.get('live').state === 'running');
+    const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    await pause(300); // a publish interval: a pass already under way may append one more
+    const settled = slateCount();
+    await pause(300); // three slate durations
+    assert.equal(slateCount(), settled, 'no slate once the source runs');
+  });
+
+  it('records a live channel, closes the recording when it stops, makes its thumbnails and reports it', async () => {
+    const events: unknown[] = [];
+    const thumbnailInputs: string[] = [];
+    const { manager, spawner } = makeManager({
+      notify: (event) => {
+        if (event.event === 'recording.closed') events.push(event);
+      },
+      renderThumbnails: async (args) => {
+        thumbnailInputs.push(args[args.indexOf('-i') + 1] ?? '');
+        await writeFile((args.at(-1) ?? '').replace('%03d', '000'), 'jpeg');
+      },
+    });
+    await manager.init();
+    await manager.create(spec({ id: 'rec', input: { type: 'srt' }, record: true, thumbnails: true }));
+    await waitFor(() => spawner.calls.length === 1);
+
+    // Stand in for ffmpeg: one segment, and a master with the RESOLUTION thumbnails are sized from.
+    const outDir = path.join(config.hlsRoot, 'rec');
+    await writeFile(path.join(outDir, '720p', 'seg_r1_00000.ts'), 'ts');
+    await writeFile(path.join(outDir, '720p', 'ffmpeg.m3u8'), '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4.0,\nseg_r1_00000.ts\n');
+    await writeFile(path.join(outDir, 'ffmpeg-master.m3u8'), '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1280x720\n720p/ffmpeg.m3u8\n');
+    await waitFor(() => manager.get('rec').recording !== null);
+    const id = manager.get('rec').recording ?? '';
+    await assert.rejects(manager.deleteRecording('rec', id), (err) => err instanceof AppError && err.status === 409);
+
+    await manager.stop('rec');
+    await waitFor(() => events.length === 1);
+    assert.deepEqual(events, [{
+      event: 'recording.closed', channel: 'rec', recording: id, durationSec: 4,
+      playbackUrl: `http://localhost:8080/hls/rec/recordings/${id}/master.m3u8`,
+    }]);
+    assert.deepEqual(thumbnailInputs, [path.join(outDir, 'recordings', id, '720p', 'index.m3u8')]);
+    const [recording] = await manager.listRecordings('rec');
+    assert.deepEqual([recording?.open, recording?.thumbnailsUrl], [false, `http://localhost:8080/hls/rec/recordings/${id}/thumbnails.vtt`]);
+  });
+
+  it('closes recordings a crash left open when it boots', async () => {
+    const variant = path.join(config.hlsRoot, 'rec', 'recordings', '20261023T160000Z', '720p');
+    await mkdir(variant, { recursive: true });
+    await writeFile(path.join(variant, 'index.m3u8'), '#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4.0,\nseg_r1_00000.ts\n');
+    await writeFile(path.join(varDir, 'channels.json'), JSON.stringify({
+      channels: [{ spec: { id: 'rec', input: { type: 'srt' }, record: true }, port: 9000, desired: 'stopped', completedAt: null }],
+    }));
+    const { manager } = makeManager();
+    await manager.init();
+    assert.match(await readFile(path.join(variant, 'index.m3u8'), 'utf8'), /#EXT-X-ENDLIST\n$/);
+    assert.equal((await manager.listRecordings('rec'))[0]?.open, false);
   });
 
   it('reports every state change with the previous state and, after a failure, why', async () => {
