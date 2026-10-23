@@ -181,13 +181,14 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
   -filter_complex "[0:v]bwdif=…:deint=interlaced,split=4[s0][s1][s2][s3];
                    [s0]scale=-2:1080,format=yuv420p[v0]; …
                    [s3]fps=fps=source_fps/ceil(source_fps/30),
-                       scale=-2:360,format=yuv420p[v3]"            # 2. decode once, scale 4 ways
-  -map [v0] -map 0:a:0 -map [v1] -map 0:a:0 …                      #    each rendition = 1 video + 1 audio
+                       scale=-2:360,format=yuv420p[v3];
+                   [0:a]aresample=async=1:first_pts=0,
+                       asplit=4[a0][a1][a2][a3]"                   # 2. decode once, scale 4 ways
+  -map [v0] -map [a0] -map [v1] -map [a1] …                        #    each rendition = 1 video + 1 audio
   -c:v libx264 -preset veryfast -profile:v high
   -force_key_frames "expr:gte(t,n_forced*4)"
   -g:v:0 120 -keyint_min:v:0 120 … -sc_threshold 0                 # 3. a keyframe exactly every 4s
   -b:v:0 5000k -maxrate:v:0 5350k -bufsize:v:0 7500k …             # 4. bitrate per rendition
-  -af aresample=async=1:first_pts=0                                #    fill audio gaps with silence
   -c:a aac -ar 48000 -ac 2 -b:a:0 128k …
   -f hls -hls_time 4 -hls_segment_type mpegts                      # 5. cut into 4s segments
   -hls_segment_filename var/hls/loop/%v/seg_<run>_%05d.ts       #    <run> is unique per ffmpeg run
@@ -224,6 +225,10 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
 - **Frame-rate cap.** A rung with `maxFps` divides the source frame rate by the smallest whole number that brings
   it under the cap: 60 → 30, 59.94 → 29.97, 50 → 25, and 29.97 stays as it is. Even cadence means no judder. The
   default ladder caps 480p and 360p at 30. At those bitrates, 60 fps mostly spends bits on frames nobody sees.
+- **Audio gaps.** `aresample=async=1` fills gaps in the audio timestamps with silence, so audio can't drift ahead of
+  video. Gaps come from packets dropped by OBS or the network, and from every loop point of a looping file. It runs
+  once, and `asplit` feeds each rendition. With one `aresample` per rendition (`-af`), ffmpeg 9 froze at the first gap
+  of a real-time input.
 - **Rungs bigger than the source are dropped.** This is decided from the ffprobe result, so a 720p source yields only
   720p and below.
   - Push inputs can't be probed before a publisher connects, so they always get the full ladder.

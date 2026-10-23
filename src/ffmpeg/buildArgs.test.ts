@@ -108,8 +108,9 @@ describe('buildArgs', () => {
       '-i', '/m/a.mp4',
       '-filter_complex',
       '[0:v]bwdif=mode=send_frame:parity=auto:deint=interlaced,split=3[s0][s1][s2];' +
-        '[s0]scale=-2:1080,format=yuv420p[v0];[s1]scale=-2:720,format=yuv420p[v1];[s2]scale=-2:360,format=yuv420p[v2]',
-      '-map', '[v0]', '-map', '0:a:0', '-map', '[v1]', '-map', '0:a:0', '-map', '[v2]', '-map', '0:a:0',
+        '[s0]scale=-2:1080,format=yuv420p[v0];[s1]scale=-2:720,format=yuv420p[v1];[s2]scale=-2:360,format=yuv420p[v2];' +
+        '[0:a]aresample=async=1:first_pts=0,asplit=3[a0][a1][a2]',
+      '-map', '[v0]', '-map', '[a0]', '-map', '[v1]', '-map', '[a1]', '-map', '[v2]', '-map', '[a2]',
       '-c:v', 'libx264', '-preset', 'veryfast', '-profile:v', 'high',
       '-force_key_frames', 'expr:gte(t,n_forced*4)',
       '-g:v:0', '120', '-keyint_min:v:0', '120', '-g:v:1', '120', '-keyint_min:v:1', '120', '-g:v:2', '120', '-keyint_min:v:2', '120',
@@ -117,7 +118,7 @@ describe('buildArgs', () => {
       '-b:v:0', '5000k', '-maxrate:v:0', '5350k', '-bufsize:v:0', '7500k',
       '-b:v:1', '2800k', '-maxrate:v:1', '2996k', '-bufsize:v:1', '4200k',
       '-b:v:2', '800k', '-maxrate:v:2', '856k', '-bufsize:v:2', '1200k',
-      '-af', 'aresample=async=1:first_pts=0', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a:0', '128k', '-b:a:1', '128k', '-b:a:2', '96k',
+      '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a:0', '128k', '-b:a:1', '128k', '-b:a:2', '96k',
       '-max_muxing_queue_size', '1024',
       '-f', 'hls', '-hls_time', '4', '-hls_segment_type', 'mpegts',
       '-hls_segment_filename', '/hls/ch/%v/seg_r1_%05d.ts',
@@ -195,13 +196,16 @@ describe('buildArgs', () => {
     const { args } = buildArgs(spec({ type: 'srt' }), {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
     });
-    assert.match(valueOf(args, '-filter_complex') ?? '', /^\[0:v\]bwdif=mode=send_frame:parity=auto:deint=interlaced,split=3/);
-    assert.equal(valueOf(args, '-af'), 'aresample=async=1:first_pts=0');
+    const filter = valueOf(args, '-filter_complex') ?? '';
+    assert.match(filter, /^\[0:v\]bwdif=mode=send_frame:parity=auto:deint=interlaced,split=3/);
+    // One resampler shared through asplit: one per rendition (-af) froze ffmpeg 9 at the first audio gap.
+    assert.match(filter, /;\[0:a\]aresample=async=1:first_pts=0,asplit=3\[a0\]\[a1\]\[a2\]$/);
+    assert.equal(args.includes('-af'), false);
 
     const copy = buildArgs(spec({ type: 'srt' }, { passthrough: true }), {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
     });
-    assert.equal(copy.args.includes('-af'), false);
+    assert.equal(copy.args.includes('-filter_complex'), false);
   });
 
   it('labels each rendition when debugOverlay is set', () => {
@@ -217,15 +221,25 @@ describe('buildArgs', () => {
     const { args } = buildArgs(spec({ type: 'srt', audio: false }), {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
     });
-    assert.equal(args.includes('0:a:0'), false);
+    assert.equal(args.includes('[a0]'), false);
+    assert.doesNotMatch(valueOf(args, '-filter_complex') ?? '', /\[0:a\]/);
     assert.equal(valueOf(args, '-var_stream_map'), 'v:0,name:1080p v:1,name:720p v:2,name:360p');
+  });
+
+  it('resamples audio without asplit for a single rendition', () => {
+    const { args } = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod' }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, height: 400 }, encoder: ENCODER,
+    });
+    assert.match(valueOf(args, '-filter_complex') ?? '', /;\[0:a\]aresample=async=1:first_pts=0\[a0\]$/);
+    assert.deepEqual(args.filter((_, i) => args[i - 1] === '-map'), ['[v0]', '[a0]']);
   });
 
   it('leaves audio out when the source has none', () => {
     const { args } = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod' }), {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, audioCodec: null }, encoder: ENCODER,
     });
-    assert.equal(args.includes('0:a:0'), false);
+    assert.equal(args.includes('[a0]'), false);
+    assert.doesNotMatch(valueOf(args, '-filter_complex') ?? '', /\[0:a\]/);
     assert.equal(args.includes('-c:a'), false);
     assert.equal(valueOf(args, '-var_stream_map'), 'v:0,name:1080p v:1,name:720p v:2,name:360p');
   });

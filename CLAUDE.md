@@ -40,6 +40,9 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   - `bwdif=…:deint=interlaced` leaves progressive frames bit-identical, so it runs on every source.
   - ffprobe reports a rotated phone clip's stored size (1920x1080 + rotation 90); ffmpeg decodes it turned
     (1080x1920). `parseProbeOutput` applies the rotation so rung selection sees what the filters see.
+  - `aresample=async=1` must run once in `-filter_complex` (then `asplit`), never as a per-output `-af`. With one
+    per rendition, the full ladder froze for good (no error, out_time stuck) at the first audio gap of a real-time
+    input, including every loop point of a looping file. Test audio changes with a looping live file.
   - The `fps` filter takes `source_fps` in its expression, which keeps the cap working for unprobed push sources.
   - Audio stays muxed into each rendition. A shared audio group would save ~2% CPU (4 AAC encodes cost 1.4s per
     minute against 52s for the video ladder) at the cost of an extra playlist players must sync. Not worth it.

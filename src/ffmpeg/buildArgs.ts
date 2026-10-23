@@ -43,6 +43,9 @@ const DEINTERLACE = 'bwdif=mode=send_frame:parity=auto:deint=interlaced';
 /**
  * Fills audio timestamp gaps (dropped packets from OBS or the network) with silence and trims overlaps, so audio
  * doesn't drift ahead of video after a gap. first_pts=0 pads audio that starts after the video.
+ * It runs once, in the filter graph, and asplit feeds the renditions. Verified with ffmpeg 9: as a per-output -af
+ * (one aresample per rendition) the full ladder froze for good at the first gap of a real-time input, which includes
+ * every loop point of a looping file. The stall watchdog then restarted it.
  */
 const AUDIO_SYNC = 'aresample=async=1:first_pts=0';
 
@@ -176,11 +179,15 @@ function ladderArgs(
           `[0:v]${DEINTERLACE},split=${rungs.length}${rungs.map((_, i) => `[s${i}]`).join('')}`,
           ...rungs.map((rung, i) => `[s${i}]${rungFilter(rung, portrait, overlay)}[v${i}]`),
         ].join(';');
+  const audio =
+    rungs.length === 1
+      ? `[0:a]${AUDIO_SYNC}[a0]`
+      : `[0:a]${AUDIO_SYNC},asplit=${rungs.length}${rungs.map((_, i) => `[a${i}]`).join('')}`;
 
-  const args = ['-filter_complex', filter];
+  const args = ['-filter_complex', hasAudio ? `${filter};${audio}` : filter];
   rungs.forEach((_, i) => {
     args.push('-map', `[v${i}]`);
-    if (hasAudio) args.push('-map', '0:a:0');
+    if (hasAudio) args.push('-map', `[a${i}]`);
   });
   args.push(...videoEncoderArgs(encoder), ...gopArgs(rungs, probe?.fps ?? null, encoder));
   rungs.forEach((rung, i) => {
@@ -192,7 +199,7 @@ function ladderArgs(
     );
   });
   if (hasAudio) {
-    args.push('-af', AUDIO_SYNC, '-c:a', 'aac', '-ar', '48000', '-ac', '2');
+    args.push('-c:a', 'aac', '-ar', '48000', '-ac', '2');
     rungs.forEach((rung, i) => args.push(`-b:a:${i}`, `${rung.audioBitrateKbps}k`));
   }
   return args;
