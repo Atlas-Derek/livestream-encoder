@@ -25,6 +25,9 @@ export interface Config {
   x264Preset: string;
   segmentSeconds: number;
   liveListSize: number;
+  /** POSTed channel and recording events (src/notify/webhooks.ts). */
+  webhookUrls: string[];
+  webhookSecret: string | null;
 }
 
 const FFMPEG_FULL_BIN = '/opt/homebrew/opt/ffmpeg-full/bin';
@@ -56,6 +59,22 @@ function readEncoder(env: NodeJS.ProcessEnv): VideoEncoder {
   throw new Error(`VIDEO_ENCODER must be libx264 or h264_videotoolbox, got "${raw}"`);
 }
 
+function readUrls(env: NodeJS.ProcessEnv, key: string): string[] {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === '') return [];
+  return raw.split(',').map((part) => {
+    const value = part.trim();
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new Error(`${key} must be comma-separated http(s) URLs, got "${value}"`);
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`${key} must use http or https, got "${value}"`);
+    return value;
+  });
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const rootDir = path.resolve(import.meta.dirname, '..');
   const varDir = path.resolve(rootDir, env.VAR_DIR ?? 'var');
@@ -75,5 +94,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     x264Preset: env.X264_PRESET ?? 'veryfast',
     segmentSeconds: readInt(env, 'SEGMENT_SECONDS', 4),
     liveListSize: readInt(env, 'LIVE_LIST_SIZE', 6),
+    webhookUrls: readUrls(env, 'WEBHOOK_URLS'),
+    webhookSecret: env.WEBHOOK_SECRET || null,
   };
 }

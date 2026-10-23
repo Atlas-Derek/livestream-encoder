@@ -36,6 +36,7 @@ import {
   type RecordingSummary,
 } from '../hls/recorder.ts';
 import type { Logger } from '../log.ts';
+import type { WebhookEvent } from '../notify/webhooks.ts';
 import {
   prepareOutputDir,
   publishVodOutput,
@@ -81,6 +82,8 @@ export interface ManagerDeps {
   killStale?: (pidDir: string) => Promise<unknown>;
   /** Runs ffmpeg once with the slate's arguments (buildSlateArgs). */
   renderSlate?: (args: string[]) => Promise<unknown>;
+  /** Channel state changes and closed recordings, for webhooks. */
+  notify?: (event: WebhookEvent) => void;
 }
 
 interface Entry {
@@ -159,6 +162,8 @@ export class ChannelManager {
   readonly #pidWrites = new Set<Promise<void>>();
   /** Why a channel has no slate, by channel id. */
   readonly #slateErrors = new Map<string, string>();
+  /** Each channel's last state, for the previous state in channel.state events. */
+  readonly #lastStates = new Map<string, ChannelState>();
 
   constructor(deps: ManagerDeps) {
     this.#deps = deps;
@@ -230,6 +235,7 @@ export class ChannelManager {
     await this.#halt(entry); // the publisher's last write must land before the directory goes
     this.#entries.delete(id);
     this.#slateErrors.delete(id);
+    this.#lastStates.delete(id);
     await this.#persist();
     await removeOutputDir(this.#outDir(id));
   }
@@ -293,7 +299,16 @@ export class ChannelManager {
     const { spec } = record;
     const recorder =
       spec.mode === 'live' && spec.record
-        ? new Recorder({ outDir: this.#outDir(spec.id), channel: spec.id, logger: this.#deps.logger })
+        ? new Recorder({
+            outDir: this.#outDir(spec.id),
+            channel: spec.id,
+            logger: this.#deps.logger,
+            onClose: ({ id, durationSec }) =>
+              this.#deps.notify?.({
+                event: 'recording.closed', channel: spec.id, recording: id, durationSec,
+                playbackUrl: `${this.#deps.config.publicHlsBaseUrl}/${spec.id}/${RECORDINGS_DIR}/${id}/master.m3u8`,
+              }),
+          })
         : null;
     const publisher =
       spec.mode === 'live'
@@ -333,7 +348,16 @@ export class ChannelManager {
   }
 
   #onStateChange(record: ChannelRecord, publisher: PlaylistPublisher | null, state: ChannelState): void {
-    this.#deps.logger.info({ channel: record.spec.id, state }, 'channel state');
+    const { id } = record.spec;
+    this.#deps.logger.info({ channel: id, state }, 'channel state');
+    const previous = this.#lastStates.get(id) ?? null;
+    this.#lastStates.set(id, state);
+    const entry = this.#entries.get(id);
+    if (this.#deps.notify && entry) {
+      // Read after the supervisor has recorded why it changed state (lastError).
+      const status = this.#status(entry);
+      this.#deps.notify({ event: 'channel.state', channel: id, state, previous, lastError: status.lastError, warnings: status.warnings });
+    }
     if (publisher !== null) {
       publisher.setSlate(SLATE_STATES.has(state));
       if (PUBLISHING_STATES.has(state)) publisher.resume();

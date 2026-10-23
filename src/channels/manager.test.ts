@@ -370,6 +370,30 @@ describe('ChannelManager', () => {
     assert.equal(manager.get('live2').state, 'waiting_for_publisher', 'the channel runs without one');
   });
 
+  it('reports every state change with the previous state and, after a failure, why', async () => {
+    const events: Array<{ state: string; previous: string | null; lastError: string | null }> = [];
+    const { manager, spawner } = makeManager({
+      notify: (event) => {
+        if (event.event === 'channel.state') events.push({ state: event.state, previous: event.previous, lastError: event.lastError });
+      },
+      timings: { initialBackoffMs: 10 },
+    });
+    await manager.init();
+    await manager.create(spec({ id: 'cam', input: { type: 'pull', url: 'rtsp://cam.local/stream' } }));
+    await waitFor(() => spawner.calls.length === 1);
+    spawner.last().progress(4);
+    await waitFor(() => manager.get('cam').state === 'running');
+    spawner.last().stderr.write('Connection reset by peer\n');
+    spawner.last().exit(1);
+    await waitFor(() => events.some((e) => e.state === 'restarting'));
+
+    assert.deepEqual(events.slice(0, 3), [
+      { state: 'starting', previous: null, lastError: null },
+      { state: 'running', previous: 'starting', lastError: null },
+      { state: 'restarting', previous: 'running', lastError: 'ffmpeg exited with code 1: Connection reset by peer' },
+    ]);
+  });
+
   it('kills stale ffmpeg on boot and keeps a pid file for each running ffmpeg', async () => {
     const swept: string[] = [];
     const { manager, spawner } = makeManager({

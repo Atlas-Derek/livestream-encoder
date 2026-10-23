@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { ChannelManager } from '../channels/manager.ts';
 import { ChannelSpecSchema } from '../channels/schema.ts';
 import { AppError } from '../errors.ts';
+import { formatMetrics } from './metrics.ts';
 
 const IdParamsSchema = z.object({ id: z.string() });
 const RecordingParamsSchema = z.object({ id: z.string(), recording: z.string() });
@@ -27,6 +28,10 @@ export function registerRoutes(app: FastifyInstance, manager: ChannelManager): v
   });
 
   app.get('/health', async () => ({ ok: true }));
+
+  app.get('/metrics', async (_request, reply) =>
+    reply.type('text/plain; version=0.0.4; charset=utf-8').send(formatMetrics(manager.list())),
+  );
 
   app.get('/channels', async () => manager.list());
 

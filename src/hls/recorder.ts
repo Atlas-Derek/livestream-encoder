@@ -78,6 +78,7 @@ export interface RecorderOptions {
   outDir: string;
   channel: string;
   logger: Logger;
+  onClose?: (recording: { id: string; durationSec: number }) => void;
 }
 
 interface OpenRecording {
@@ -154,6 +155,9 @@ export class Recorder implements RecordingSink {
       }
       await this.#copyMaster(recording.dir); // the published master may have gained CODECS since
       this.#opts.logger.info({ channel: this.#opts.channel, recording: recording.id }, 'recording closed');
+      const [first] = recording.playlists.values();
+      const seconds = first?.segments.reduce((sum, s) => sum + segmentDuration(s), 0) ?? 0;
+      this.#opts.onClose?.({ id: recording.id, durationSec: Math.round(seconds * 1000) / 1000 });
     } catch (err) {
       this.#fail(err);
     }

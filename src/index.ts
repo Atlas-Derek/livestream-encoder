@@ -5,6 +5,7 @@ import { registerRoutes } from './api/routes.ts';
 import { ChannelManager } from './channels/manager.ts';
 import { LadderSchema } from './channels/schema.ts';
 import { loadConfig } from './config.ts';
+import { Webhooks } from './notify/webhooks.ts';
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
@@ -12,7 +13,14 @@ const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
 const ladderPath = path.join(config.rootDir, 'config', 'ladder.json');
 const defaultLadder = LadderSchema.parse(JSON.parse(await readFile(ladderPath, 'utf8')));
 
-const manager = new ChannelManager({ config, logger: app.log, defaultLadder });
+const webhooks =
+  config.webhookUrls.length > 0 ? new Webhooks({ urls: config.webhookUrls, secret: config.webhookSecret, logger: app.log }) : null;
+const manager = new ChannelManager({
+  config,
+  logger: app.log,
+  defaultLadder,
+  ...(webhooks === null ? {} : { notify: (event) => webhooks.send(event) }),
+});
 await manager.init();
 registerRoutes(app, manager);
 
@@ -24,6 +32,8 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   try {
     await app.close();
     await manager.shutdown();
+    // The final state changes, but not for longer than a webhook's own timeout.
+    await Promise.race([webhooks?.flush(), new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
     process.exit(0);
   } catch (err) {
     app.log.error({ err }, 'shutdown failed');

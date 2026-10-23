@@ -69,6 +69,7 @@ Playback URL: `http://localhost:8080/hls/<id>/master.m3u8`.
 | `DELETE /channels/:id` | Stop the channel and delete its output, recordings included |
 | `GET /channels/:id/recordings` | The channel's recordings: `id`, `startedAt`, `durationSec`, `open` (still being written), `variants`, `playbackUrl` |
 | `DELETE /channels/:id/recordings/:recording` | Delete a recording (409 while it is being written) |
+| `GET /metrics` | Prometheus metrics per channel: `lse_channel_state` (one-hot), `lse_channel_desired_running`, `lse_channel_restarts_total`, `lse_channel_uptime_seconds`, `lse_channel_realtime_factor`, `lse_channel_fps`, `lse_channel_warnings`, `lse_channel_recording`. Scrape `http://127.0.0.1:3000/metrics`. |
 
 Channel options:
 
@@ -204,6 +205,22 @@ Live sources besides OBS:
 | `INGEST_HOST` | `localhost` (the hostname shown in ingest URLs) |
 | `VAR_DIR` / `HLS_ROOT` | `var` / `var/hls` |
 | `LOG_LEVEL` | `info` (`debug` also logs every ffmpeg stderr line) |
+| `WEBHOOK_URLS` | none. Comma-separated http(s) URLs that get a JSON POST for each channel state change and each closed recording (see [Webhooks](#webhooks)) |
+| `WEBHOOK_SECRET` | none. When set, each webhook carries `X-LSE-Signature: sha256=<HMAC-SHA256 of the body>` |
+
+### Webhooks
+
+```json
+{"event":"channel.state","channel":"obs","state":"restarting","previous":"running",
+ "lastError":"ffmpeg exited with code 1: Connection reset by peer","warnings":[],"at":"2026-10-23T19:59:55.120Z"}
+{"event":"recording.closed","channel":"obs","recording":"20261023T195943Z","durationSec":12.433,
+ "playbackUrl":"http://localhost:8080/hls/obs/recordings/20261023T195943Z/master.m3u8","at":"…"}
+```
+
+- The `X-LSE-Event` header names the event. Verify `X-LSE-Signature` against the raw body before trusting it.
+- Each URL gets its events in order. A network error, 5xx or 429 is retried after 1s, 2s and 4s; any other status
+  drops the event. Either way it is logged, and channels never wait for a webhook.
+- On shutdown the API waits up to 5s for deliveries still queued.
 
 ## How it works
 
