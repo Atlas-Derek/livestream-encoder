@@ -165,6 +165,42 @@ export function publishMasterPlaylist(source: string): string {
     .join('\n');
 }
 
+/**
+ * The start variant's BANDWIDTH ceiling. 720p of the default ladder peaks at about 3.15 Mbps (2800k video, 128k audio,
+ * muxing overhead).
+ */
+export const START_MAX_BANDWIDTH = 3_500_000;
+
+/**
+ * Lists first the variant players should start on. Safari and hls.js both start on the first variant listed before
+ * they have measured anything, and ffmpeg lists the top rung first, so every viewer began at 5 Mbps and stalled on a
+ * slow link. The start variant is the highest whose BANDWIDTH is at most START_MAX_BANDWIDTH (else the lowest); the
+ * others keep their order. hls.js sorts variants by bitrate for switching, so only the start changes.
+ */
+export function orderVariants(master: string): string {
+  const lines = master.split('\n');
+  const firstVariant = lines.findIndex((line) => line.startsWith('#EXT-X-STREAM-INF:'));
+  if (firstVariant === -1) return master;
+  // Each variant is an EXT-X-STREAM-INF line and its URI. Anything else after the first one (an I-frame playlist,
+  // say) isn't understood here, so the playlist is left as it is rather than risk dropping it.
+  const variants: Array<{ inf: string; uri: string; bandwidth: number }> = [];
+  const rest = lines.slice(firstVariant).filter((line) => line.trim() !== '');
+  for (let i = 0; i < rest.length; i += 2) {
+    const inf = rest[i] ?? '';
+    const uri = rest[i + 1];
+    const bandwidth = Number(/[:,]BANDWIDTH=(\d+)/.exec(inf)?.[1]);
+    if (!inf.startsWith('#EXT-X-STREAM-INF:') || uri === undefined || uri.startsWith('#') || !Number.isFinite(bandwidth)) {
+      return master;
+    }
+    variants.push({ inf, uri, bandwidth });
+  }
+  const byBandwidth = [...variants].sort((a, b) => a.bandwidth - b.bandwidth);
+  const start = byBandwidth.filter((v) => v.bandwidth <= START_MAX_BANDWIDTH).at(-1) ?? byBandwidth[0];
+  if (start === undefined) return master;
+  const ordered = [start, ...variants.filter((v) => v !== start)];
+  return [...lines.slice(0, firstVariant), ...ordered.map((v) => `${v.inf}\n${v.uri}\n`)].join('\n');
+}
+
 /** Files a media playlist refers to: its segments and init sections. */
 export function playlistReferences(text: string): Set<string> {
   const refs = new Set<string>();

@@ -1,12 +1,13 @@
 import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Logger } from '../log.ts';
-import { fillMissingCodecs, type ProbeSegmentStreams } from './codecs.ts';
+import { fillStreamInfo, type ProbeSegmentStreams } from './codecs.ts';
 import {
   FFMPEG_MASTER_PLAYLIST,
   FFMPEG_MEDIA_PLAYLIST,
   MASTER_PLAYLIST,
   MEDIA_PLAYLIST,
+  orderVariants,
   publishMasterPlaylist,
   publishMediaPlaylist,
 } from './playlist.ts';
@@ -18,7 +19,7 @@ export interface PublisherOptions {
   channel: string;
   logger: Logger;
   intervalMs?: number;
-  /** Reads a segment's codec configuration, to add CODECS where ffmpeg left it out (HEVC). */
+  /** Reads a segment's streams, to add the CODECS (HEVC) and FRAME-RATE ffmpeg leaves out. */
   probeStreams?: ProbeSegmentStreams;
 }
 
@@ -111,7 +112,10 @@ export class PlaylistPublisher {
     await this.#publishMaster();
   }
 
-  /** Like #publish, plus the CODECS ffmpeg left out; republished until every variant has a segment to read them from. */
+  /**
+   * Like #publish, plus the CODECS and FRAME-RATE ffmpeg left out (republished until every variant has a segment to
+   * read them from) and the start variant listed first.
+   */
   async #publishMaster(): Promise<void> {
     const { outDir, probeStreams } = this.#opts;
     const from = path.join(outDir, FFMPEG_MASTER_PLAYLIST);
@@ -120,10 +124,11 @@ export class PlaylistPublisher {
     let text = publishMasterPlaylist(source);
     let complete = true;
     if (probeStreams !== undefined) {
-      const filled = await fillMissingCodecs(text, outDir, probeStreams);
-      for (const error of filled.errors) this.#opts.logger.warn({ channel: this.#opts.channel, error }, 'CODECS not added');
+      const filled = await fillStreamInfo(text, outDir, probeStreams);
+      for (const error of filled.errors) this.#opts.logger.warn({ channel: this.#opts.channel, error }, 'stream info not added');
       ({ text, complete } = filled);
     }
+    text = orderVariants(text);
     const to = path.join(outDir, MASTER_PLAYLIST);
     if ((await readIfExists(to)) !== text) await writeAtomic(to, text);
     if (complete) this.#published.set(from, source);

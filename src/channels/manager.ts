@@ -6,8 +6,8 @@ import { AppError } from '../errors.ts';
 import { buildArgs, liveRetainedSegments, redactSecrets } from '../ffmpeg/buildArgs.ts';
 import { killStaleFfmpeg, writePidFile } from '../ffmpeg/pids.ts';
 import { createProbe, createSegmentStreamProbe, type ProbeFn } from '../ffmpeg/probe.ts';
-import { fillMissingCodecs, type ProbeSegmentStreams } from '../hls/codecs.ts';
-import { MASTER_PLAYLIST } from '../hls/playlist.ts';
+import { fillStreamInfo, type ProbeSegmentStreams } from '../hls/codecs.ts';
+import { MASTER_PLAYLIST, orderVariants } from '../hls/playlist.ts';
 import {
   Supervisor,
   type ChannelState,
@@ -112,8 +112,8 @@ export class ChannelManager {
   readonly #deps: ManagerDeps;
   readonly #probe: ProbeFn;
   readonly #probeStreams: ProbeSegmentStreams;
-  /** CODECS fills of finished VOD masters, so shutdown() can wait for them. */
-  readonly #codecFills = new Set<Promise<void>>();
+  /** Finishing touches to completed VOD masters, so shutdown() can wait for them. */
+  readonly #masterFinishes = new Set<Promise<void>>();
   readonly #entries = new Map<string, Entry>();
   #writing: Promise<void> = Promise.resolve();
   readonly #pidWrites = new Set<Promise<void>>();
@@ -190,7 +190,7 @@ export class ChannelManager {
   /** Stops every ffmpeg so playlists are finalized, without changing what should autostart next boot. */
   async shutdown(): Promise<void> {
     await Promise.all([...this.#entries.values()].map((entry) => this.#halt(entry)));
-    await Promise.all([this.#writing, ...this.#pidWrites, ...this.#codecFills]);
+    await Promise.all([this.#writing, ...this.#pidWrites, ...this.#masterFinishes]);
   }
 
   /** Stops ffmpeg, then publishes whatever it wrote while finalizing. */
@@ -272,28 +272,32 @@ export class ChannelManager {
     record.desired = 'stopped';
     void this.#persistLogged();
     if (record.spec.mode === 'vod') {
-      const fill = this.#fillVodCodecs(record.spec.id);
-      this.#codecFills.add(fill);
+      const finish = this.#finishVodMaster(record.spec.id);
+      this.#masterFinishes.add(finish);
       void (async () => {
-        await fill;
-        this.#codecFills.delete(fill);
+        await finish;
+        this.#masterFinishes.delete(finish);
       })();
     }
   }
 
-  /** A VOD master is ffmpeg's own (live ones go through the publisher), so add the CODECS it left out once done. */
-  async #fillVodCodecs(id: string): Promise<void> {
+  /**
+   * A VOD master is ffmpeg's own (live ones go through the publisher), so once done, add the CODECS and FRAME-RATE it
+   * left out and list the start variant first.
+   */
+  async #finishVodMaster(id: string): Promise<void> {
     const { logger } = this.#deps;
     const masterPath = path.join(this.#outDir(id), MASTER_PLAYLIST);
     try {
       const text = await readFile(masterPath, 'utf8');
-      const filled = await fillMissingCodecs(text, this.#outDir(id), this.#probeStreams);
-      for (const error of filled.errors) logger.warn({ channel: id, error }, 'CODECS not added');
-      if (filled.text === text) return;
-      await writeFile(`${masterPath}.tmp`, filled.text);
+      const filled = await fillStreamInfo(text, this.#outDir(id), this.#probeStreams);
+      for (const error of filled.errors) logger.warn({ channel: id, error }, 'stream info not added');
+      const finished = orderVariants(filled.text);
+      if (finished === text) return;
+      await writeFile(`${masterPath}.tmp`, finished);
       await rename(`${masterPath}.tmp`, masterPath);
     } catch (err) {
-      logger.error({ channel: id, err }, 'failed to add CODECS to the master playlist');
+      logger.error({ channel: id, err }, 'failed to finish the master playlist');
     }
   }
 

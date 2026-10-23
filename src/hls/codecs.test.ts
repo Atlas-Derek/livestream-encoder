@@ -7,7 +7,8 @@ import {
   audioCodecString,
   avcCodecString,
   codecsFromProbe,
-  fillMissingCodecs,
+  fillStreamInfo,
+  frameRateFromProbe,
   hevcCodecString,
   parseHexdump,
 } from './codecs.ts';
@@ -58,7 +59,16 @@ describe('codec strings', () => {
   });
 });
 
-describe('fillMissingCodecs', () => {
+describe('frameRateFromProbe', () => {
+  it('reads the video rate, preferring the average', () => {
+    const rate = frameRateFromProbe({ streams: [{ codec_type: 'video', avg_frame_rate: '30000/1001', r_frame_rate: '60/1' }] });
+    assert.ok(Math.abs((rate ?? 0) - 29.97) < 0.001);
+    assert.equal(frameRateFromProbe({ streams: [{ codec_type: 'video', avg_frame_rate: '0/0', r_frame_rate: '25/1' }] }), 25);
+    assert.equal(frameRateFromProbe({ streams: [{ codec_type: 'audio' }] }), null);
+  });
+});
+
+describe('fillStreamInfo', () => {
   let outDir: string;
   beforeEach(async () => {
     outDir = await mkdtemp(path.join(tmpdir(), 'lse-codecs-'));
@@ -78,7 +88,7 @@ describe('fillMissingCodecs', () => {
       '#EXTM3U\n#EXT-X-MAP:URI="init_r1.mp4"\n#EXTINF:4.0,\nseg_r1_00000.m4s\n#EXTINF:4.0,\nseg_r1_00001.m4s\n',
     );
     const calls: Array<[string, string | null]> = [];
-    const filled = await fillMissingCodecs(master(), outDir, async (segment, init) => {
+    const filled = await fillStreamInfo(master(), outDir, async (segment, init) => {
       calls.push([path.relative(outDir, segment), init === null ? null : path.relative(outDir, init)]);
       return hevc;
     });
@@ -87,18 +97,27 @@ describe('fillMissingCodecs', () => {
     assert.deepEqual([filled.complete, filled.errors], [true, []]);
   });
 
-  it('leaves variants that already have CODECS alone, and waits for live variants without segments', async () => {
-    const untouched = await fillMissingCodecs(master(',CODECS="avc1.640028"'), outDir, async () => assert.fail('no probe'));
-    assert.equal(untouched.text, master(',CODECS="avc1.640028"'));
+  it('adds FRAME-RATE next to the CODECS ffmpeg wrote, with three decimals', async () => {
+    await mkdir(path.join(outDir, 'source'));
+    await writeFile(path.join(outDir, 'source', 'index.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nseg_r1_00000.ts\n');
+    const h264 = { streams: [{ codec_type: 'video', codec_name: 'h264', avg_frame_rate: '30000/1001' }] };
+    const filled = await fillStreamInfo(master(',CODECS="avc1.640028"'), outDir, async () => h264);
+    assert.equal(filled.text, master(',CODECS="avc1.640028",FRAME-RATE=29.970'));
+  });
 
-    const notYet = await fillMissingCodecs(master(), outDir, async () => hevc); // no variant playlist yet
+  it('leaves complete variants alone, and waits for live variants without segments', async () => {
+    const complete = ',CODECS="avc1.640028",FRAME-RATE=30.000';
+    const untouched = await fillStreamInfo(master(complete), outDir, async () => assert.fail('no probe'));
+    assert.equal(untouched.text, master(complete));
+
+    const notYet = await fillStreamInfo(master(), outDir, async () => hevc); // no variant playlist yet
     assert.deepEqual([notYet.text, notYet.complete, notYet.errors], [master(), false, []]);
   });
 
   it('reports a variant it cannot read instead of writing a guess', async () => {
     await mkdir(path.join(outDir, 'source'));
     await writeFile(path.join(outDir, 'source', 'index.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nseg_r1_00000.ts\n');
-    const filled = await fillMissingCodecs(master(), outDir, async () => {
+    const filled = await fillStreamInfo(master(), outDir, async () => {
       throw new Error('ffprobe failed');
     });
     assert.deepEqual([filled.text, filled.complete, filled.errors], [master(), true, ['source/index.m3u8: ffprobe failed']]);

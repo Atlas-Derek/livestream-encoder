@@ -1,12 +1,16 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { parseFrameRate } from '../ffmpeg/probe.ts';
 import { parseMediaPlaylist } from './playlist.ts';
 
 /**
- * Builds the CODECS attribute of EXT-X-STREAM-INF when ffmpeg leaves it out. ffmpeg 9 writes none at all for HEVC,
- * not even the audio part, and players then have to guess: Safari needs it to decide whether it can play a variant.
- * The strings come from the stream's own codec configuration (ffprobe's extradata), not from guesses, and nothing is
- * written when a codec isn't recognised: a wrong CODECS is worse than none.
+ * Completes the EXT-X-STREAM-INF attributes ffmpeg leaves out, from each variant's first segment.
+ * - CODECS: ffmpeg 9 writes none at all for HEVC, not even the audio part, and players then have to guess: Safari
+ *   needs it to decide whether it can play a variant. The strings come from the stream's own codec configuration
+ *   (ffprobe's extradata), not from guesses, and nothing is written when a codec isn't recognised: a wrong CODECS is
+ *   worse than none.
+ * - FRAME-RATE: ffmpeg never writes it, and Apple's HLS authoring spec requires it for video. It is what the segment
+ *   really carries, so a rung capped by maxFps reports its own rate, and push sources (unknown up front) are covered.
  */
 
 /** Reads ffprobe's -show_data hexdump ("00000000: 0101 6000 …  ..`.") back into bytes. */
@@ -137,30 +141,39 @@ export function codecsFromProbe(json: unknown): string | null {
   return parts.length > 0 ? parts.join(',') : null;
 }
 
+/** The video frame rate of a segment, from ffprobe -show_streams JSON; null without video or a known rate. */
+export function frameRateFromProbe(json: unknown): number | null {
+  const streams = isRecord(json) && Array.isArray(json.streams) ? json.streams.filter(isRecord) : [];
+  const video = streams.find((s) => s.codec_type === 'video');
+  return video === undefined ? null : (parseFrameRate(video.avg_frame_rate) ?? parseFrameRate(video.r_frame_rate));
+}
+
 /** Runs ffprobe -show_streams -show_data on a segment, with its init section prepended for fMP4. */
 export type ProbeSegmentStreams = (segment: string, init: string | null) => Promise<unknown>;
 
-export interface MasterCodecs {
+export interface MasterStreamInfo {
   text: string;
-  /** False while a variant without CODECS has no segment to read yet; publish again later. */
+  /** False while a variant missing an attribute has no segment to read yet; publish again later. */
   complete: boolean;
-  /** Variants whose segment couldn't be read or whose codecs aren't recognised; they keep no CODECS. */
+  /** Variants whose segment couldn't be read or whose codecs aren't recognised; they go without. */
   errors: string[];
 }
 
 const MAP_URI = /URI="([^"]+)"/;
 
-/** Adds CODECS to every EXT-X-STREAM-INF that lacks it, reading the first segment of that variant. */
-export async function fillMissingCodecs(
+/** Adds CODECS and FRAME-RATE to every EXT-X-STREAM-INF that lacks them, reading the first segment of that variant. */
+export async function fillStreamInfo(
   master: string,
   outDir: string,
   probeStreams: ProbeSegmentStreams,
-): Promise<MasterCodecs> {
+): Promise<MasterStreamInfo> {
   const lines = master.split('\n');
   let complete = true;
   const errors: string[] = [];
   for (const [i, line] of lines.entries()) {
-    if (!line.startsWith('#EXT-X-STREAM-INF:') || line.includes('CODECS=')) continue;
+    const needsCodecs = !line.includes('CODECS=');
+    const needsFrameRate = !line.includes('FRAME-RATE=');
+    if (!line.startsWith('#EXT-X-STREAM-INF:') || (!needsCodecs && !needsFrameRate)) continue;
     const uri = lines.slice(i + 1).find((next) => next.trim() !== '' && !next.startsWith('#'))?.trim();
     if (uri === undefined) continue;
     const playlistPath = path.join(outDir, uri);
@@ -173,9 +186,16 @@ export async function fillMissingCodecs(
       }
       const dir = path.dirname(playlistPath);
       const init = first.map === null ? undefined : MAP_URI.exec(first.map)?.[1];
-      const codecs = codecsFromProbe(await probeStreams(path.join(dir, first.uri), init === undefined ? null : path.join(dir, init)));
-      if (codecs === null) errors.push(`${uri}: unrecognised codecs, CODECS left out`);
-      else lines[i] = `${line},CODECS="${codecs}"`;
+      const streams = await probeStreams(path.join(dir, first.uri), init === undefined ? null : path.join(dir, init));
+      let filled = line;
+      if (needsCodecs) {
+        const codecs = codecsFromProbe(streams);
+        if (codecs === null) errors.push(`${uri}: unrecognised codecs, CODECS left out`);
+        else filled += `,CODECS="${codecs}"`;
+      }
+      const frameRate = needsFrameRate ? frameRateFromProbe(streams) : null;
+      if (frameRate !== null) filled += `,FRAME-RATE=${frameRate.toFixed(3)}`; // RFC 8216: three decimal places
+      lines[i] = filled;
     } catch (err) {
       if (err instanceof Error && 'code' in err && err.code === 'ENOENT') complete = false; // not written yet
       else errors.push(`${uri}: ${err instanceof Error ? err.message : String(err)}`);

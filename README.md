@@ -355,12 +355,20 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
 ```
 #EXTM3U
 #EXT-X-VERSION:6
-#EXT-X-STREAM-INF:BANDWIDTH=5451248,AVERAGE-BANDWIDTH=5027195,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2"
-1080p/index.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=3094480,AVERAGE-BANDWIDTH=2906028,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2"
+#EXT-X-STREAM-INF:BANDWIDTH=3144112,AVERAGE-BANDWIDTH=3074677,RESOLUTION=1280x720,CODECS="avc1.640020,mp4a.40.2",FRAME-RATE=60.000
 720p/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5269264,AVERAGE-BANDWIDTH=5220133,RESOLUTION=1920x1080,CODECS="avc1.64002a,mp4a.40.2",FRAME-RATE=60.000
+1080p/index.m3u8
 …
 ```
+
+The app finishes ffmpeg's master playlist (live ones when they are published, VOD ones when the encode completes):
+- **`FRAME-RATE`**, which Apple's HLS authoring spec requires for video and ffmpeg never writes. It is read from
+  each rendition's first segment, so capped rungs report their own rate and push sources are covered too.
+- **The start rendition is listed first.** Safari starts on the first rendition listed, before it has measured
+  anything, and ffmpeg lists the top rung first, so every viewer began at 5 Mbps. The first listed is now the
+  highest whose `BANDWIDTH` is at most 3.5 Mbps (720p with the default ladder), or the lowest if none is; the rest
+  keep their order.
 
 ### Live playlists vs VOD playlists
 
@@ -586,7 +594,7 @@ touched.
 
 ### What the player does
 
-1. Fetches `master.m3u8` and reads the renditions' `BANDWIDTH`, `RESOLUTION` and `CODECS`.
+1. Fetches `master.m3u8` and reads the renditions' `BANDWIDTH`, `RESOLUTION`, `CODECS` and `FRAME-RATE`.
 2. Picks a starting rendition from its bandwidth estimate and the player size, then fetches that rendition's
    `index.m3u8`.
 3. Downloads segments in order and feeds them to the browser's video decoder. hls.js uses Media Source Extensions;

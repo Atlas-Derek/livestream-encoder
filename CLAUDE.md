@@ -52,7 +52,7 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
     `npl=203` (BT.2408 reference white); hable at npl=100 came out far too dark. Push sources can't be probed, so
     their color is left alone and the encoder carries the publisher's tags. Passthrough is untouched.
   - The `fps` filter takes `source_fps` in its expression, which keeps the cap working for unprobed push sources.
-  - HEVC passthrough: ffmpeg writes no `CODECS` at all for HEVC from an MP4 (hvcC) source, so `fillMissingCodecs`
+  - HEVC passthrough: ffmpeg writes no `CODECS` at all for HEVC from an MP4 (hvcC) source, so `fillStreamInfo`
     (src/hls/codecs.ts) adds it from the first segment. ffmpeg writes `hev1` unless given `-tag:v hvc1`, which Apple
     requires. Copying AAC from MPEG-TS/SRT/RTMP into fMP4 fails without `-bsf:a aac_adtstoasc`. A copied push stream
     has no bitrate, so `BANDWIDTH` is nonsense unless `-b:v`/`-b:a` are declared.
@@ -79,6 +79,9 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
   them into `index.m3u8`/`master.m3u8` (logic in `src/hls/playlist.ts`), adding `EXT-X-DISCONTINUITY-SEQUENCE` and a
   per-run `EXT-X-MAP`. Never serve ffmpeg's copies to players. VOD is a single run, so ffmpeg writes the served
   names directly.
+- Master playlists are finished by the app, live ones in the publisher and VOD ones when the encode completes:
+  `fillStreamInfo` adds the `CODECS` and `FRAME-RATE` ffmpeg leaves out (from each variant's first segment), and
+  `orderVariants` lists the start variant first (highest `BANDWIDTH` ≤ 3.5 Mbps), since players start on it.
 - The live sweep keeps anything `ffmpeg.m3u8` or the published `index.m3u8` references: only the published one
   still lists earlier runs' init sections.
 - nginx must keep the CORS headers and preflight handling (`nginx/cors.conf`, included in every HLS location) and

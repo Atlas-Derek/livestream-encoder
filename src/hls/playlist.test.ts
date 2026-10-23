@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { parseMediaPlaylist, playlistReferences, publishMasterPlaylist, publishMediaPlaylist } from './playlist.ts';
+import {
+  orderVariants,
+  parseMediaPlaylist,
+  playlistReferences,
+  publishMasterPlaylist,
+  publishMediaPlaylist,
+} from './playlist.ts';
 
 function playlist(lines: string[]): string {
   return `${lines.join('\n')}\n`;
@@ -118,5 +124,32 @@ describe('playlistReferences', () => {
       '#EXT-X-DISCONTINUITY', '#EXT-X-MAP:URI="init_r2_a.mp4"', '#EXTINF:1.0,', 'seg_r2_00001.m4s',
     ]);
     assert.deepEqual([...playlistReferences(text)].sort(), ['init_r1_a.mp4', 'init_r2_a.mp4', 'seg_r1_00000.m4s', 'seg_r2_00001.m4s']);
+  });
+});
+
+describe('orderVariants', () => {
+  // As ffmpeg writes it for the default ladder: top rung first, a blank line after each URI.
+  const variant = (bandwidth: number, name: string) => [`#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=x`, `${name}/index.m3u8`, ''];
+  const master = (...variants: string[][]) => playlist(['#EXTM3U', '#EXT-X-VERSION:6', ...variants.flat()]);
+  const order = (text: string) => [...text.matchAll(/^(\w+)\/index\.m3u8$/gm)].map((m) => m[1]);
+
+  it('lists first the highest variant within the start bandwidth, and keeps the others in order', () => {
+    const text = master(variant(5_499_000, '1080p'), variant(3_144_488, '720p'), variant(1_634_472, '480p'), variant(969_328, '360p'));
+    const ordered = orderVariants(text);
+    assert.deepEqual(order(ordered), ['720p', '1080p', '480p', '360p']);
+    assert.ok(ordered.startsWith('#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-STREAM-INF:BANDWIDTH=3144488,RESOLUTION=x\n720p/index.m3u8\n'));
+    assert.equal(orderVariants(ordered), ordered, 'stable when republished');
+  });
+
+  it('starts on the lowest variant when every one is above the start bandwidth', () => {
+    assert.deepEqual(order(orderVariants(master(variant(8_000_000, '4k'), variant(5_000_000, '1080p')))), ['1080p', '4k']);
+  });
+
+  it('leaves a master it does not fully understand as it is', () => {
+    const iframes = master(variant(5_000_000, '1080p'), ['#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=90000,URI="iframes.m3u8"'], variant(900_000, '360p'));
+    assert.equal(orderVariants(iframes), iframes);
+    const noBandwidth = master(['#EXT-X-STREAM-INF:RESOLUTION=x', 'a/index.m3u8'], variant(900_000, '360p'));
+    assert.equal(orderVariants(noBandwidth), noBandwidth);
+    assert.equal(orderVariants('#EXTM3U\n'), '#EXTM3U\n');
   });
 });
