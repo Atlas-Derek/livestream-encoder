@@ -122,6 +122,22 @@ describe('Supervisor', () => {
     }
   });
 
+  it('restarts a non-looping live file after a failure', async () => {
+    const { supervisor, spawner } = makeSupervisor({ restart: 'on-failure' });
+    supervisor.start();
+    await flush();
+    spawner.last().progress(4);
+    await tick(5_000);
+    spawner.last().stderr.write('Error while decoding stream #0:0\n');
+    await flush();
+    spawner.last().exit(1);
+    await flush();
+    assert.equal(supervisor.state, 'restarting');
+    await tick(1_000);
+    assert.equal(spawner.children.length, 2);
+    assert.match(supervisor.status().lastError ?? '', /code 1: Error while decoding/);
+  });
+
   it('reports a failed VOD run as an error with the last ffmpeg line', async () => {
     const { supervisor, spawner } = makeSupervisor({ restart: 'never' });
     supervisor.start();
