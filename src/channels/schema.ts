@@ -1,7 +1,10 @@
 import { z } from 'zod';
 
 export const RungSchema = z.object({
-  name: z.string().regex(/^[A-Za-z0-9_-]+$/, 'rung name may only contain letters, digits, _ and -'),
+  name: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/, 'rung name may only contain letters, digits, _ and -')
+    .refine((name) => name !== 'recordings', 'rung name "recordings" is reserved for recordings'),
   /** The picture's short side: the height of landscape video, the width of portrait video. */
   height: z.number().int().min(144).max(4320),
   videoBitrateKbps: z.number().int().positive(),
@@ -78,6 +81,8 @@ export const ChannelSpecSchema = z
     debugOverlay: z.boolean().default(false),
     /** Live only: how far back players can seek. Without it, the live window is LIVE_LIST_SIZE segments. */
     dvrWindowSeconds: z.number().int().positive().max(6 * 3600).optional(),
+    /** Live only: keep everything the source sends as VOD recordings, one per uninterrupted stretch. */
+    record: z.boolean().default(false),
   })
   .superRefine((spec, ctx) => {
     if (spec.mode === 'vod' && !(spec.input.type === 'file' && !spec.input.loop)) {
@@ -85,6 +90,9 @@ export const ChannelSpecSchema = z
     }
     if (spec.passthrough && spec.ladder) {
       ctx.addIssue({ code: 'custom', path: ['ladder'], message: 'passthrough produces a single rendition; omit ladder' });
+    }
+    if (spec.mode === 'vod' && spec.record) {
+      ctx.addIssue({ code: 'custom', path: ['record'], message: 'recording is for live channels; VOD output is already kept' });
     }
     if (spec.mode === 'vod' && spec.dvrWindowSeconds !== undefined) {
       ctx.addIssue({ code: 'custom', path: ['dvrWindowSeconds'], message: 'a DVR window is for live channels; VOD lists every segment' });

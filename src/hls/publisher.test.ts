@@ -106,6 +106,36 @@ describe('PlaylistPublisher', () => {
     assert.equal((await segments()).length, 3, 'off once the source is back');
   });
 
+  it('records what the source publishes, and closes the recording when the source goes down or publishing stops', async () => {
+    const events: string[] = [];
+    const recorder = {
+      record: async (variant: string, _dir: string, _header: string[], segments: Array<{ uri: string }>) => {
+        events.push(`${variant}: ${segments.map((s) => s.uri).join(' ')}`);
+      },
+      close: async () => void events.push('close'),
+    };
+    const variant = (from: number, to: number) =>
+      `#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:${from}\n${Array.from({ length: to - from + 1 }, (_, i) => `#EXTINF:0.100,\nseg_r1_0000${from + i}.ts\n`).join('')}`;
+    await writeFfmpegOutput(variant(0, 1));
+    await writeFile(path.join(outDir, '720p', 'slate.m3u8'), '#EXTM3U\n#EXTINF:0.100,\nslate_h1_000.ts\n#EXT-X-ENDLIST\n');
+    const publisher = new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger, windowSize: 1, recorder });
+
+    await publisher.sync();
+    await writeFfmpegOutput(variant(1, 2));
+    await publisher.sync();
+    assert.deepEqual(events, ['720p: seg_r1_00000.ts seg_r1_00001.ts', '720p: seg_r1_00002.ts'], 'even what a short window trims at once');
+
+    publisher.setSlate(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 120));
+    await publisher.sync();
+    assert.deepEqual(events.slice(2), ['close'], 'the source has been down for a segment');
+    assert.match(await read('720p', 'index.m3u8'), /slate_h1_000\.ts/);
+
+    await publisher.pause();
+    assert.equal(events.at(-1), 'close');
+    assert.equal(events.filter((e) => e.includes('slate')).length, 0, 'the slate is never recorded');
+  });
+
   it('polls while resumed and publishes once more when paused', async () => {
     const publisher = new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger, intervalMs: 10 });
     publisher.resume();

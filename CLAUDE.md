@@ -103,6 +103,9 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
 
 - `var/` (gitignored): `hls/` output, `channels.json` (persisted channels), `pids/` (ffmpeg pid files, used to kill
   orphans after a crash), `nginx/` logs and temp dirs. `media/` (gitignored) holds input files.
+- `var/hls/<channel>/recordings/<id>/` (`src/hls/recorder.ts`): hard links to the segments a recording channel
+  published, plus EVENT/VOD playlists. The live sweep leaves this directory alone, and `recordings` is not a valid
+  rung name.
 
 ## Git
 

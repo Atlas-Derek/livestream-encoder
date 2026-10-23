@@ -5,6 +5,7 @@ import { ChannelSpecSchema } from '../channels/schema.ts';
 import { AppError } from '../errors.ts';
 
 const IdParamsSchema = z.object({ id: z.string() });
+const RecordingParamsSchema = z.object({ id: z.string(), recording: z.string() });
 
 function parseId(params: unknown): string {
   return IdParamsSchema.parse(params).id;
@@ -40,6 +41,14 @@ export function registerRoutes(app: FastifyInstance, manager: ChannelManager): v
   app.post('/channels/:id/start', async (request) => manager.start(parseId(request.params)));
 
   app.post('/channels/:id/stop', async (request) => manager.stop(parseId(request.params)));
+
+  app.get('/channels/:id/recordings', async (request) => manager.listRecordings(parseId(request.params)));
+
+  app.delete('/channels/:id/recordings/:recording', async (request, reply) => {
+    const { id, recording } = RecordingParamsSchema.parse(request.params);
+    await manager.deleteRecording(id, recording);
+    return reply.status(204).send();
+  });
 
   app.delete('/channels/:id', async (request, reply) => {
     await manager.remove(parseId(request.params));

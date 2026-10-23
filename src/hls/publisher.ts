@@ -2,6 +2,7 @@ import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Logger } from '../log.ts';
 import { fillStreamInfo, type ProbeSegmentStreams } from './codecs.ts';
+import type { RecordingSink } from './recorder.ts';
 import {
   appendSlateSegment,
   FFMPEG_MASTER_PLAYLIST,
@@ -15,6 +16,7 @@ import {
   publishMediaPlaylist,
   segmentDuration,
   SLATE_PLAYLIST,
+  unpublishedSegments,
 } from './playlist.ts';
 
 export const DEFAULT_PUBLISH_INTERVAL_MS = 250;
@@ -40,6 +42,8 @@ export interface PublisherOptions {
   passthrough?: boolean;
   /** Segments per published playlist. */
   windowSize?: number;
+  /** Gets each segment published from the source, and is closed when the source goes down or publishing stops. */
+  recorder?: RecordingSink;
 }
 
 function isMissing(err: unknown): boolean {
@@ -98,6 +102,7 @@ export class PlaylistPublisher {
     this.#timer = null;
     if (this.#syncing !== null) await this.#syncing;
     await this.sync();
+    await this.#opts.recorder?.close();
   }
 
   /**
@@ -188,10 +193,18 @@ export class PlaylistPublisher {
     let published = await readIfExists(to);
     const source = await readIfExists(from);
     if (source !== null && this.#published.get(from) !== source) {
+      const before = published === null ? null : parseMediaPlaylist(published);
+      const fresh = unpublishedSegments(parseMediaPlaylist(source), before).segments;
       published = publishMediaPlaylist(source, published, windowSize);
       await writeAtomic(to, published);
       this.#published.set(from, source);
       this.#trackSegmentLength(variant, source);
+      if (this.#opts.recorder !== undefined && fresh.length > 0) {
+        // As published (discontinuity and init section corrected), unless already trimmed from a short window.
+        const after = parseMediaPlaylist(published);
+        const asPublished = fresh.map((segment) => after.segments.find((s) => s.uri === segment.uri) ?? segment);
+        await this.#opts.recorder.record(variant, dir, after.header, asPublished);
+      }
     }
     if (published === null) return;
 
@@ -204,6 +217,8 @@ export class PlaylistPublisher {
       this.#edges.set(variant, edge);
     }
     if (!this.#slate || now < edge.at + edge.seconds * 1000) return;
+    // The source has been down for a segment: whatever it comes back with is a new recording.
+    await this.#opts.recorder?.close();
     const slate = await readIfExists(path.join(dir, SLATE_PLAYLIST));
     const next = slate === null ? null : appendSlateSegment(published, slate, windowSize);
     if (next === null) return;

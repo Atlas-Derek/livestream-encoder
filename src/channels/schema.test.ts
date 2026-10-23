@@ -24,6 +24,14 @@ describe('ChannelSpecSchema', () => {
     assert.equal(parsed.ladder, undefined);
   });
 
+  it('records live channels only, and keeps the recordings directory name out of ladders', () => {
+    assert.equal(ChannelSpecSchema.parse({ id: 'a', input: { type: 'srt' } }).record, false);
+    assert.equal(ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'srt' }, record: true }).success, true);
+    assert.equal(ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'file', path: 'a.mp4' }, mode: 'vod', record: true }).success, false);
+    const ladder = [{ name: 'recordings', height: 720, videoBitrateKbps: 1, audioBitrateKbps: 1 }];
+    assert.equal(ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'srt' }, ladder }).success, false);
+  });
+
   it('allows a DVR window on live channels only', () => {
     const parse = (extra: Record<string, unknown>) => ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'file', path: 'a.mp4' }, ...extra });
     assert.equal(parse({ dvrWindowSeconds: 3600 }).success, true);

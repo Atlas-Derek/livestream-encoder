@@ -66,7 +66,9 @@ Playback URL: `http://localhost:8080/hls/<id>/master.m3u8`.
 | `POST /channels` | Create and start a channel |
 | `GET /channels`, `GET /channels/:id` | State, progress (fps, speed, bitrate), restarts, last error, last 50 ffmpeg log lines, ingest and playback URLs |
 | `POST /channels/:id/start`, `POST /channels/:id/stop` | Start or stop a channel |
-| `DELETE /channels/:id` | Stop the channel and delete its output |
+| `DELETE /channels/:id` | Stop the channel and delete its output, recordings included |
+| `GET /channels/:id/recordings` | The channel's recordings: `id`, `startedAt`, `durationSec`, `open` (still being written), `variants`, `playbackUrl` |
+| `DELETE /channels/:id/recordings/:recording` | Delete a recording (409 while it is being written) |
 
 Channel options:
 
@@ -75,6 +77,7 @@ Channel options:
 | `mode` | `live` or `vod` | `live` |
 | `segmentType` | `mpegts` or `fmp4` | `mpegts` |
 | `passthrough` | `true` copies the streams without re-encoding (single rendition) | `false` |
+| `record` | Live only: keep everything the source sends as VOD recordings (see [Recording](#recording)). | `false` |
 | `dvrWindowSeconds` | Live only: how far back players can seek, up to 6 hours. The published playlist lists that many seconds of segments (at least `LIVE_LIST_SIZE`), and their files are kept for as long. Every playlist refresh then carries the whole window, so keep it to what viewers need. | none |
 | `debugOverlay` | `true` prints each rendition's name in its picture, for watching ABR switches. Not with passthrough. | `false` |
 | `ladder` | per-channel list of rungs: `[{name, height, videoBitrateKbps, audioBitrateKbps, maxFps?}]`. `height` is the short side, so it is the width for portrait sources. | `config/ladder.json` |
@@ -477,6 +480,22 @@ played out, until the source is back:
 - Slate segments loop, with `#EXT-X-DISCONTINUITY` where they start, where they wrap and where the source comes back.
   Their `#EXT-X-PROGRAM-DATE-TIME` carries on from the last live segment.
 - If the slate can't be rendered, the channel still runs, and `warnings` says why. Passthrough channels have none.
+
+### Recording
+
+With `"record": true`, a live channel keeps what its source sends as VOD:
+- Each segment the publisher takes from ffmpeg (never the slate) is hard-linked into
+  `var/hls/<channel>/recordings/<id>/<rung>/`. Nothing is copied, and ffmpeg deleting its own copy doesn't matter.
+- While it is written, each rendition's playlist is an `EVENT` playlist: players can start from the beginning and
+  follow it live. The recording's `master.m3u8` is the channel's (CODECS, FRAME-RATE, start rendition).
+- A recording ends when the source has been down for a segment (when the slate starts) or the channel stops. It
+  becomes VOD (`#EXT-X-ENDLIST`). The next segment from the source starts a new one. A quick ffmpeg restart within a
+  segment stays in the same recording, after a discontinuity.
+- Recordings left open by a crash are closed when the API starts.
+- The id is the start time, e.g. `20261023T195607Z`. Play one at
+  `http://localhost:8080/hls/<channel>/recordings/<id>/master.m3u8`; `GET /channels/:id/recordings` lists them.
+- Recordings are kept until deleted, with the channel or with `DELETE /channels/:id/recordings/:recording`. They
+  take as much disk as the stream's bitrate: about 5 GB an hour for the default ladder (10.9 Mbps across its renditions).
 
 nginx returns 404 for `ffmpeg*.m3u8`. VOD output is a single run, so ffmpeg writes `master.m3u8` and `index.m3u8`
 directly.

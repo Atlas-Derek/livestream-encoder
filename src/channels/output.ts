@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { FFMPEG_MEDIA_PLAYLIST, MEDIA_PLAYLIST, playlistReferences, SLATE_PLAYLIST } from '../hls/playlist.ts';
+import { RECORDINGS_DIR } from '../hls/recorder.ts';
 import type { ChannelSpec } from './schema.ts';
 
 // seg_<runId>_<n>; plain seg_<n> is the naming used before run ids, still swept from existing output.
@@ -87,7 +88,7 @@ export async function prepareOutputDir(
 
   if (mode === 'live') {
     for (const entry of await readdir(outDir, { withFileTypes: true })) {
-      if (entry.isDirectory() && !variants.includes(entry.name)) {
+      if (entry.isDirectory() && !variants.includes(entry.name) && entry.name !== RECORDINGS_DIR) {
         await rm(path.join(outDir, entry.name), { recursive: true, force: true });
       }
     }

@@ -186,17 +186,29 @@ function publishedSourceSequence(prev: MediaPlaylist | null): number | null {
 }
 
 /**
+ * ffmpeg's segments that a published playlist doesn't include yet: those after the last of ffmpeg's numbers it records.
+ * reset: ffmpeg's numbering went back (its playlist was deleted), so all of them are new.
+ */
+export function unpublishedSegments(
+  next: MediaPlaylist,
+  prev: MediaPlaylist | null,
+): { segments: Segment[]; reset: boolean } {
+  const watermark = publishedSourceSequence(prev);
+  const lastSource = next.segments.at(-1)?.seq;
+  if (watermark !== null && lastSource !== undefined && lastSource < watermark) {
+    return { segments: next.segments, reset: true };
+  }
+  return { segments: next.segments.filter((s) => watermark === null || s.seq > watermark), reset: false };
+}
+
+/**
  * Pure: the variant playlist players should see, from ffmpeg's playlist and the one published before it. ffmpeg's
  * segments not yet published are appended, then the result is trimmed to windowSize segments.
  */
 export function publishMediaPlaylist(source: string, previous: string | null, windowSize: number): string {
   const next = parseMediaPlaylist(source);
   const prev = previous === null ? null : parseMediaPlaylist(previous);
-  let watermark = publishedSourceSequence(prev);
-  const lastSource = next.segments.at(-1)?.seq;
-  // ffmpeg's numbering went back (its playlist was deleted): everything in it is new.
-  const reset = watermark !== null && lastSource !== undefined && lastSource < watermark;
-  if (reset) watermark = null;
+  const { segments: unpublished, reset } = unpublishedSegments(next, prev);
 
   // Each run's init section as last published. ffmpeg's playlist only has the current run's.
   const maps = new Map<string, string | null>((prev?.segments ?? []).map((s) => [s.runId, s.map]));
@@ -204,8 +216,7 @@ export function publishMediaPlaylist(source: string, previous: string | null, wi
 
   let predecessor = prev?.segments.at(-1);
   const added: Segment[] = [];
-  for (const segment of next.segments) {
-    if (watermark !== null && segment.seq <= watermark) continue;
+  for (const segment of unpublished) {
     const out: Segment = {
       ...segment,
       discontinuity: (reset && added.length === 0 && predecessor !== undefined) || startsRun(segment, predecessor),
@@ -214,7 +225,7 @@ export function publishMediaPlaylist(source: string, previous: string | null, wi
     added.push(out);
     predecessor = out;
   }
-  const sourceSequence = added.at(-1)?.seq ?? watermark;
+  const sourceSequence = added.at(-1)?.seq ?? (reset ? null : publishedSourceSequence(prev));
   const published = appendAndTrim(prev, next.header, added, windowSize, sourceSequence);
   return formatMediaPlaylist({ ...published, trailer: next.trailer });
 }

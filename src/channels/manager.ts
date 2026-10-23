@@ -27,6 +27,14 @@ import {
   type SupervisorTimings,
 } from '../ffmpeg/supervisor.ts';
 import { PlaylistPublisher } from '../hls/publisher.ts';
+import {
+  deleteRecording,
+  finalizeRecordings,
+  listRecordings,
+  Recorder,
+  RECORDINGS_DIR,
+  type RecordingSummary,
+} from '../hls/recorder.ts';
 import type { Logger } from '../log.ts';
 import {
   prepareOutputDir,
@@ -51,6 +59,8 @@ const StoreSchema = z.object({ channels: z.array(ChannelRecordSchema) });
 
 export interface ChannelStatus extends SupervisorStatus {
   id: string;
+  /** The recording being written, for channels with record: true. */
+  recording: string | null;
   spec: ChannelSpec;
   port: number | null;
   desired: ChannelRecord['desired'];
@@ -80,6 +90,12 @@ interface Entry {
   publisher: PlaylistPublisher | null;
   /** Why the last finished VOD encode couldn't replace the served output; cleared on start. */
   publishError: string | null;
+  /** Live channels with record: true. */
+  recorder: Recorder | null;
+}
+
+export interface RecordingStatus extends RecordingSummary {
+  playbackUrl: string;
 }
 
 /** States in which ffmpeg may be writing playlists, so the publisher keeps polling. */
@@ -165,6 +181,9 @@ export class ChannelManager {
 
     for (const record of await this.#load()) {
       this.#entries.set(record.spec.id, this.#makeEntry(record));
+      // Recordings a crash or shutdown left open; nothing records into them now.
+      const closed = await finalizeRecordings(this.#outDir(record.spec.id));
+      if (closed.length > 0) logger.info({ channel: record.spec.id, recordings: closed }, 'closed recordings left open');
       if (record.desired === 'running' && record.completedAt === null) this.#supervisor(record.spec.id).start();
     }
     logger.info({ channels: this.#entries.size }, 'channels loaded');
@@ -215,6 +234,22 @@ export class ChannelManager {
     await removeOutputDir(this.#outDir(id));
   }
 
+  async listRecordings(id: string): Promise<RecordingStatus[]> {
+    this.#entry(id);
+    const base = `${this.#deps.config.publicHlsBaseUrl}/${id}/${RECORDINGS_DIR}`;
+    return (await listRecordings(this.#outDir(id))).map((r) => ({ ...r, playbackUrl: `${base}/${r.id}/master.m3u8` }));
+  }
+
+  async deleteRecording(id: string, recordingId: string): Promise<void> {
+    const entry = this.#entry(id);
+    if (entry.recorder?.current === recordingId) {
+      throw new AppError(`recording "${recordingId}" is still being written; stop the channel first`, 409);
+    }
+    if (!(await deleteRecording(this.#outDir(id), recordingId))) {
+      throw new AppError(`recording "${recordingId}" not found`, 404);
+    }
+  }
+
   /** Stops every ffmpeg so playlists are finalized, without changing what should autostart next boot. */
   async shutdown(): Promise<void> {
     await Promise.all([...this.#entries.values()].map((entry) => this.#halt(entry)));
@@ -256,6 +291,10 @@ export class ChannelManager {
 
   #makeEntry(record: ChannelRecord): Entry {
     const { spec } = record;
+    const recorder =
+      spec.mode === 'live' && spec.record
+        ? new Recorder({ outDir: this.#outDir(spec.id), channel: spec.id, logger: this.#deps.logger })
+        : null;
     const publisher =
       spec.mode === 'live'
         ? new PlaylistPublisher({
@@ -266,9 +305,10 @@ export class ChannelManager {
             segmentSeconds: this.#deps.config.segmentSeconds,
             passthrough: spec.passthrough,
             windowSize: publishedWindow(spec, this.#deps.config),
+            ...(recorder === null ? {} : { recorder }),
           })
         : null;
-    return { record, publisher, supervisor: this.#makeSupervisor(record, publisher), publishError: null };
+    return { record, publisher, recorder, supervisor: this.#makeSupervisor(record, publisher), publishError: null };
   }
 
   #makeSupervisor(record: ChannelRecord, publisher: PlaylistPublisher | null): Supervisor {
@@ -421,7 +461,7 @@ export class ChannelManager {
   }
 
   #status(entry: Entry): ChannelStatus {
-    const { record, supervisor, publisher } = entry;
+    const { record, supervisor, publisher, recorder } = entry;
     const { spec, port } = record;
     const { ingestHost, publicHlsBaseUrl } = this.#deps.config;
     let ingestUrl: string | null = null;
@@ -437,6 +477,7 @@ export class ChannelManager {
       completedAt: record.completedAt,
       ingestUrl,
       playbackUrl: `${publicHlsBaseUrl}/${spec.id}/master.m3u8`,
+      recording: recorder?.current ?? null,
       ...status,
       // The publisher remembers the last run's segments, which only matter while it runs.
       warnings: [
@@ -444,6 +485,7 @@ export class ChannelManager {
         ...(status.state === 'running' ? (publisher?.warnings() ?? []) : []),
         ...(entry.publishError === null ? [] : [entry.publishError]),
         ...(slateError === undefined ? [] : [slateError]),
+        ...(recorder?.error ? [recorder.error] : []),
       ],
     };
   }

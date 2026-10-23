@@ -53,11 +53,12 @@ describe('prepareOutputDir', () => {
     await touch(path.join(variant, 'init_r2_720p.mp4'));
     await touch(path.join(variant, 'init_1.mp4'));
     await touch(path.join(outDir, '1440p', 'index.m3u8'));
+    await touch(path.join(outDir, 'recordings', '20261023T160000Z', '720p', 'seg_r1_00003.ts'));
     await touch(path.join(outDir, 'master.m3u8'));
 
     await prepareOutputDir(outDir, ['720p', '360p'], 'live');
 
-    assert.deepEqual((await readdir(outDir)).sort(), ['360p', '720p', 'master.m3u8']);
+    assert.deepEqual((await readdir(outDir)).sort(), ['360p', '720p', 'master.m3u8', 'recordings']);
     assert.deepEqual((await readdir(variant)).sort(), [
       'ffmpeg.m3u8', 'index.m3u8', 'init_r1_720p.mp4', 'init_r2_720p.mp4', 'seg_r1_00009.ts', 'seg_r2_00010.ts',
     ]);

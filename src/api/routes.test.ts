@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -22,6 +22,7 @@ beforeEach(async () => {
     defaultLadder: [{ name: '720p', height: 720, videoBitrateKbps: 2800, audioBitrateKbps: 128 }],
     spawn: fakeSpawner({ exitOnKill: true }).spawn,
     killStale: async () => {},
+    renderSlate: async () => {},
   });
   await manager.init();
   app = Fastify();
@@ -63,5 +64,22 @@ describe('routes', () => {
 
     const missing = await app.inject({ method: 'POST', url: '/channels/nope/start' });
     assert.deepEqual([missing.statusCode, missing.json()], [404, { error: 'channel "nope" not found' }]);
+  });
+
+  it('lists and deletes a channel\'s recordings', async () => {
+    await app.inject({ method: 'POST', url: '/channels', payload: { id: 'rec', input: { type: 'srt' }, record: true } });
+    const dir = path.join(varDir, 'hls', 'rec', 'recordings', '20261023T160000Z', '720p');
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'index.m3u8'), '#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:4.0,\nseg_r1_00000.ts\n#EXT-X-ENDLIST\n');
+
+    const list = await app.inject({ method: 'GET', url: '/channels/rec/recordings' });
+    assert.deepEqual(list.json(), [{
+      id: '20261023T160000Z', startedAt: '2026-10-23T16:00:00.000Z', durationSec: 4, open: false, variants: ['720p'],
+      playbackUrl: 'http://localhost:8080/hls/rec/recordings/20261023T160000Z/master.m3u8',
+    }]);
+    assert.equal((await app.inject({ method: 'DELETE', url: '/channels/rec/recordings/..%2F720p' })).statusCode, 404);
+    assert.equal((await app.inject({ method: 'DELETE', url: '/channels/rec/recordings/20261023T160000Z' })).statusCode, 204);
+    assert.deepEqual((await app.inject({ method: 'GET', url: '/channels/rec/recordings' })).json(), []);
+    assert.equal((await app.inject({ method: 'GET', url: '/channels/nope/recordings' })).statusCode, 404);
   });
 });
