@@ -59,6 +59,30 @@ export function rejectWrongStreamKey(line: string): string | null {
   return /Unexpected stream \S+, expecting/.test(line) ? 'rejected publisher with wrong stream key' : null;
 }
 
+/**
+ * A push channel maps audio unless created with audio: false. A video-only publisher makes ffmpeg fail with
+ * "Stream map '' matches no streams" on every reconnect, so say what to change instead.
+ */
+export function rejectMissingAudio(line: string): string | null {
+  return /^Stream map '.*' matches no streams/.test(line)
+    ? 'publisher sent no audio; recreate the channel with "audio": false in its input for a video-only source'
+    : null;
+}
+
+function publisherCheck(spec: ChannelSpec): ((line: string) => string | null) | null {
+  const { input } = spec;
+  if (input.type !== 'rtmp' && input.type !== 'srt') return null;
+  const checks = [...(input.type === 'rtmp' ? [rejectWrongStreamKey] : []), ...(input.audio ? [rejectMissingAudio] : [])];
+  if (checks.length === 0) return null;
+  return (line) => {
+    for (const check of checks) {
+      const reason = check(line);
+      if (reason !== null) return reason;
+    }
+    return null;
+  };
+}
+
 function restartPolicy(spec: ChannelSpec): RestartPolicy {
   if (spec.mode === 'vod') return 'never';
   if (spec.input.type === 'file' && !spec.input.loop) return 'on-failure';
@@ -184,13 +208,14 @@ export class ChannelManager {
   #makeSupervisor(record: ChannelRecord): Supervisor {
     const { spec } = record;
     const listener = spec.input.type === 'rtmp' || spec.input.type === 'srt';
+    const rejectPublisher = publisherCheck(spec);
     return new Supervisor({
       id: spec.id,
       command: this.#deps.config.ffmpegPath,
       prepare: () => this.#prepare(record),
       restart: restartPolicy(spec),
       listener,
-      ...(spec.input.type === 'rtmp' ? { rejectPublisher: rejectWrongStreamKey } : {}),
+      ...(rejectPublisher ? { rejectPublisher } : {}),
       redact: redactSecrets,
       logger: this.#deps.logger,
       ...(this.#deps.spawn ? { spawn: this.#deps.spawn } : {}),

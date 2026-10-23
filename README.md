@@ -72,6 +72,7 @@ Channel options:
 | `segmentType` | `mpegts` or `fmp4` | `mpegts` |
 | `passthrough` | `true` copies the streams without re-encoding (single rendition) | `false` |
 | `ladder` | per-channel list of rungs: `[{name, height, videoBitrateKbps, audioBitrateKbps}]` | `config/ladder.json` |
+| `input.audio` (rtmp, srt) | `false` for a video-only encoder. Push sources can't be probed before a publisher connects, so this decides whether the renditions carry audio. A publisher that sends no audio to a channel expecting it is disconnected, and `lastError` says to set this. | `true` |
 
 Channels persist in `var/channels.json` and restart when the API starts. Completed VOD encodes are not redone.
 
@@ -208,7 +209,7 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
   720p and below.
   - Push inputs can't be probed before a publisher connects, so they always get the full ladder.
   - If the source is smaller than every rung, there is one rendition at the source height.
-  - If the source has no audio, the audio mappings are left out.
+  - If the source has no audio (or a push channel was created with `"audio": false`), the audio mappings are left out.
 
 **3. Keyframe alignment.** This is the most important detail for ABR.
 - **Why it matters.**

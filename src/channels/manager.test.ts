@@ -8,7 +8,7 @@ import { AppError } from '../errors.ts';
 import type { ProbeFn, ProbeResult } from '../ffmpeg/probe.ts';
 import { silentLogger } from '../log.ts';
 import { fakeSpawner, waitFor } from '../testing/fakes.ts';
-import { ChannelManager, rejectWrongStreamKey, type ManagerDeps } from './manager.ts';
+import { ChannelManager, rejectMissingAudio, rejectWrongStreamKey, type ManagerDeps } from './manager.ts';
 import { ChannelSpecSchema, type Rung } from './schema.ts';
 
 const LADDER: Rung[] = [
@@ -77,7 +77,7 @@ describe('ChannelManager', () => {
     assert.equal(a.ingestUrl, 'rtmp://localhost:1935/live/ka');
     assert.equal(c.ingestUrl, 'srt://localhost:9000?mode=caller');
     assert.equal(a.playbackUrl, 'http://localhost:8080/hls/a/master.m3u8');
-    assert.deepEqual(c.spec.input, { type: 'srt', passphrase: '********' });
+    assert.deepEqual(c.spec.input, { type: 'srt', passphrase: '********', audio: true });
 
     await assert.rejects(manager.create(spec({ id: 'd', input: { type: 'rtmp', streamKey: 'kd' } })), {
       message: 'no free rtmp ports in 1935-1936',
@@ -208,5 +208,13 @@ describe('rejectWrongStreamKey', () => {
   it('matches ffmpeg’s wrong-key warning only', () => {
     assert.equal(rejectWrongStreamKey('[rtmp @ 0xaaf03c000] Unexpected stream WRONGKEY, expecting abc'), 'rejected publisher with wrong stream key');
     assert.equal(rejectWrongStreamKey('[flv @ 0x1] Failed to update header'), null);
+  });
+});
+
+describe('rejectMissingAudio', () => {
+  it('matches the map failure a video-only publisher causes', () => {
+    // Verified against ffmpeg 9 with an SRT caller sending video only.
+    assert.match(rejectMissingAudio("Stream map '' matches no streams.") ?? '', /"audio": false/);
+    assert.equal(rejectMissingAudio('[hls @ 0x1] Opening seg_r1_00001.ts for writing'), null);
   });
 });

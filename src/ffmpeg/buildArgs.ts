@@ -178,8 +178,9 @@ function hlsArgs(spec: ChannelSpec, outDir: string, runId: string, varStreamMap:
 /** Pure: turns a channel spec into the ffmpeg argument list. Never shell-joined; pass straight to spawn. */
 export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult {
   const { outDir, runId, ladder, port, probe, encoder } = options;
-  // Push inputs are assumed to carry audio (OBS always does); probed sources tell us.
-  const hasAudio = probe === null || probe.audioCodec !== null;
+  // Push inputs declare it (OBS always sends audio); probed sources tell us.
+  const { input } = spec;
+  const hasAudio = input.type === 'rtmp' || input.type === 'srt' ? input.audio : probe === null || probe.audioCodec !== null;
 
   const args = ['-hide_banner', '-nostdin', '-loglevel', 'warning', '-nostats', '-progress', 'pipe:1', '-y'];
   args.push(...inputArgs(spec.input, spec.mode, port, probe));

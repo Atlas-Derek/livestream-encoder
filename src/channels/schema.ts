@@ -25,15 +25,23 @@ const PullInputSchema = z.object({
   url: z.url({ protocol: /^(rtsps?|rtmps?|https?|srt|udp)$/ }),
 });
 
+/**
+ * Push sources can't be probed before a publisher connects, so whether they carry audio is declared up front.
+ * It fixes the renditions in the master playlist, which must not change while players are watching.
+ */
+const pushAudio = z.boolean().default(true);
+
 const RtmpInputSchema = z.object({
   type: z.literal('rtmp'),
   streamKey: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'stream key may only contain letters, digits, _ and -'),
+  audio: pushAudio,
 });
 
 const SrtInputSchema = z.object({
   type: z.literal('srt'),
   /** SRT requires 10-79 characters when encryption is used. */
   passphrase: z.string().min(10).max(79).optional(),
+  audio: pushAudio,
 });
 
 export const InputSchema = z.discriminatedUnion('type', [

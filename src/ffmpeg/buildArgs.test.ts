@@ -70,19 +70,19 @@ describe('inputArgs', () => {
   });
 
   it('listens for RTMP on the assigned port and key', () => {
-    assert.deepEqual(inputArgs({ type: 'rtmp', streamKey: 'abc' }, 'live', 1936), [
+    assert.deepEqual(inputArgs({ type: 'rtmp', streamKey: 'abc', audio: true }, 'live', 1936), [
       '-listen', '1', '-i', 'rtmp://0.0.0.0:1936/live/abc',
     ]);
   });
 
   it('listens for SRT with an encoded passphrase', () => {
-    assert.deepEqual(inputArgs({ type: 'srt', passphrase: 'pass word&123' }, 'live', 9001), [
+    assert.deepEqual(inputArgs({ type: 'srt', passphrase: 'pass word&123', audio: true }, 'live', 9001), [
       '-i', 'srt://0.0.0.0:9001?mode=listener&passphrase=pass%20word%26123&pbkeylen=16',
     ]);
   });
 
   it('refuses a listener without a port', () => {
-    assert.throws(() => inputArgs({ type: 'srt' }, 'live', null), AppError);
+    assert.throws(() => inputArgs({ type: 'srt', audio: true }, 'live', null), AppError);
   });
 });
 
@@ -151,6 +151,14 @@ describe('buildArgs', () => {
       outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
     });
     assert.equal(valueOf(args, '-i'), 'srt://0.0.0.0:9000?mode=listener');
+  });
+
+  it('leaves audio out of a push channel declared video-only', () => {
+    const { args } = buildArgs(spec({ type: 'srt', audio: false }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
+    });
+    assert.equal(args.includes('0:a:0'), false);
+    assert.equal(valueOf(args, '-var_stream_map'), 'v:0,name:1080p v:1,name:720p v:2,name:360p');
   });
 
   it('leaves audio out when the source has none', () => {
