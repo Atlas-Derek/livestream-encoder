@@ -218,6 +218,10 @@ Live sources besides OBS:
 | `WEBHOOK_URLS` | none. Comma-separated http(s) URLs that get a JSON POST for each channel state change and each closed recording (see [Webhooks](#webhooks)) |
 | `WEBHOOK_SECRET` | none. When set, each webhook carries `X-LSE-Signature: sha256=<HMAC-SHA256 of the body>` |
 
+## Features
+
+Opt-in per channel or per deployment; the channel options and environment variables above switch them on.
+
 ### Seek thumbnails
 
 With `"thumbnails": true`, a finished VOD encode and each closed recording get seek-bar previews: sprite sheets
