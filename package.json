@@ -17,7 +17,8 @@
     "test-media": "scripts/make-test-media.sh",
     "push:rtmp": "scripts/push-rtmp.sh",
     "push:srt": "scripts/push-srt.sh",
-    "check:hls": "node --disable-warning=ExperimentalWarning src/tools/check-hls.ts"
+    "check:hls": "node --disable-warning=ExperimentalWarning src/tools/check-hls.ts",
+    "e2e": "scripts/e2e.sh"
   },
   "dependencies": {
     "fastify": "^5.12.7",

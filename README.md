@@ -135,6 +135,28 @@ It checks the invariants ABR playback depends on, and exits 1 on a problem, so i
 - No segment is longer than `EXT-X-TARGETDURATION`.
 - Live playlists carry `EXT-X-DISCONTINUITY-SEQUENCE`, and all renditions agree on it.
 
+### The end-to-end test
+
+```sh
+npm run e2e   # about 4 minutes; exits 1 if any check fails
+```
+
+`scripts/e2e.sh` runs the whole stack against real ffmpeg and nginx and checks it end to end:
+- nginx (through `scripts/nginx.sh`, with `PLAYBACK_SECRET`) and the API on their default ports, with all data in a
+  temporary directory, never `var/`.
+- One channel of each kind: an encrypted VOD with thumbnails, an HDR VOD, a looping live file with a DVR window, an
+  encrypted RTMP channel, an RTMP passthrough channel, an SRT channel with a passphrase, and an HTTP pull of
+  another channel's signed URL. RTMP and SRT are pushed with `push:rtmp` and `push:srt`.
+- Every channel: its state and warnings, a signed playback URL, `check:hls`, an ffmpeg viewer decoding it, and a
+  `403` without the signature. Then HDR tone mapping, thumbnails, the DVR window, the AES key, `/metrics`.
+- The RTMP publisher drops out and comes back: the slate, recording on demand (two recordings, both playable, with
+  thumbnails), a graceful restart, and signed webhooks for it all.
+
+It needs the test media (`npm run sample`, `npm run test-media`), and refuses to start while anything listens on
+its ports (8080, 3000, 1935-1937, 9000-9001, 8719): stop your own `npm run nginx` and `npm run dev` first. It stops
+everything it started when it ends, also on Ctrl+C. `KEEP=1 npm run e2e` keeps the temporary directory (logs, output);
+it is kept anyway when a check fails.
+
 ### Test sources
 
 `npm run test-media` writes short labelled clips to `media/test/`, one per path through the encoder. Use any of them

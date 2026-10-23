@@ -15,6 +15,8 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
 - `npm run test-media` — labelled clips in `media/test/`, one per encoder path (portrait, rotated, 1080i, 60 fps,
   no audio, HEVC, HDR, 5.1, audio gap). `npm run check:hls -- <master URL or path>` — checks keyframe alignment,
   discontinuities and playlist rules; exits 1 on a problem. Use both to verify encoder changes against real ffmpeg.
+- `npm run e2e` — `scripts/e2e.sh`: the whole stack against real ffmpeg and nginx (about 4 minutes), with data in a
+  temporary directory. Needs the default ports free, so the user's own nginx and API must be stopped first.
 
 ## Conventions
 
