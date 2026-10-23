@@ -24,6 +24,14 @@ describe('ChannelSpecSchema', () => {
     assert.equal(parsed.ladder, undefined);
   });
 
+  it('gives SRT inputs an internet-sized latency by default, within libsrt-sane bounds', () => {
+    const input = (extra: Record<string, unknown> = {}) => ChannelSpecSchema.safeParse({ id: 'a', input: { type: 'srt', ...extra } });
+    assert.deepEqual(input().data?.input, { type: 'srt', latencyMs: 1000, audio: true });
+    assert.equal(input({ latencyMs: 120 }).success, true);
+    assert.equal(input({ latencyMs: 5 }).success, false);
+    assert.equal(input({ latencyMs: 1.5 }).success, false);
+  });
+
   it('keeps pull channels reconnecting unless loop is turned off', () => {
     // Also what channels.json written before the option existed parses to.
     assert.deepEqual(ChannelSpecSchema.parse({ id: 'a', input: { type: 'pull', url: 'rtsp://cam/s' } }).input, {

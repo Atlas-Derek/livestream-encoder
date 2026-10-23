@@ -49,6 +49,12 @@ const SrtInputSchema = z.object({
   type: z.literal('srt'),
   /** SRT requires 10-79 characters when encryption is used. */
   passphrase: z.string().min(10).max(79).optional(),
+  /**
+   * How long SRT may wait for lost packets to be resent; the connection uses the larger of this and the publisher's.
+   * libsrt's 120ms default suits a LAN; over the internet a few round trips are needed. HLS already adds 10s or more,
+   * so a second costs viewers little.
+   */
+  latencyMs: z.number().int().min(20).max(10_000).default(1000),
   audio: pushAudio,
 });
 

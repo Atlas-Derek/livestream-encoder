@@ -132,14 +132,16 @@ describe('inputArgs', () => {
   });
 
   it('listens for SRT, with an encoded passphrase when one is set', () => {
-    assert.deepEqual(inputArgs({ type: 'srt', passphrase: 'pass word&123', audio: true }, 'live', 9001), [
-      '-i', 'srt://0.0.0.0:9001?mode=listener&passphrase=pass%20word%26123&pbkeylen=16',
+    assert.deepEqual(inputArgs({ type: 'srt', passphrase: 'pass word&123', latencyMs: 1000, audio: true }, 'live', 9001), [
+      '-i', 'srt://0.0.0.0:9001?mode=listener&latency=1000000&passphrase=pass%20word%26123&pbkeylen=16',
     ]);
-    assert.deepEqual(inputArgs({ type: 'srt', audio: true }, 'live', 9000), ['-i', 'srt://0.0.0.0:9000?mode=listener']);
+    assert.deepEqual(inputArgs({ type: 'srt', latencyMs: 2500, audio: true }, 'live', 9000), [
+      '-i', 'srt://0.0.0.0:9000?mode=listener&latency=2500000',
+    ]);
   });
 
   it('refuses a listener without a port', () => {
-    assert.throws(() => inputArgs({ type: 'srt', audio: true }, 'live', null), AppError);
+    assert.throws(() => inputArgs({ type: 'srt', latencyMs: 1000, audio: true }, 'live', null), AppError);
   });
 });
 

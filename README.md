@@ -77,6 +77,7 @@ Channel options:
 | `passthrough` | `true` copies the streams without re-encoding (single rendition) | `false` |
 | `debugOverlay` | `true` prints each rendition's name in its picture, for watching ABR switches. Not with passthrough. | `false` |
 | `ladder` | per-channel list of rungs: `[{name, height, videoBitrateKbps, audioBitrateKbps, maxFps?}]`. `height` is the short side, so it is the width for portrait sources. | `config/ladder.json` |
+| `input.latencyMs` (srt) | How long SRT waits for lost packets to be resent. The connection uses the larger of this and the publisher's setting, so publishers needn't change theirs. libsrt's 120ms default suits a LAN; over the internet allow several round trips. It adds to latency, but HLS already adds 10s or more. | `1000` |
 | `input.audio` (rtmp, srt) | `false` for a video-only encoder. Push sources can't be probed before a publisher connects, so this decides whether the renditions carry audio. A publisher that sends no audio to a channel expecting it is disconnected, and `lastError` says to set this. | `true` |
 
 Channels persist in `var/channels.json` and restart when the API starts. Completed VOD encodes are not redone.

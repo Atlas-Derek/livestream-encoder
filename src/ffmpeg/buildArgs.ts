@@ -186,7 +186,8 @@ export function inputArgs(
     case 'rtmp':
       return ['-listen', '1', '-i', `rtmp://0.0.0.0:${requirePort(port, input)}/live/${input.streamKey}`];
     case 'srt': {
-      let url = `srt://0.0.0.0:${requirePort(port, input)}?mode=listener`;
+      // latency is in microseconds.
+      let url = `srt://0.0.0.0:${requirePort(port, input)}?mode=listener&latency=${input.latencyMs * 1000}`;
       if (input.passphrase !== undefined) url += `&passphrase=${encodeURIComponent(input.passphrase)}&pbkeylen=16`;
       return ['-i', url];
     }

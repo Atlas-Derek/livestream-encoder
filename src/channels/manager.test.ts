@@ -81,7 +81,7 @@ describe('ChannelManager', () => {
     assert.equal(a.ingestUrl, 'rtmp://localhost:1935/live/ka');
     assert.equal(c.ingestUrl, 'srt://localhost:9000?mode=caller');
     assert.equal(a.playbackUrl, 'http://localhost:8080/hls/a/master.m3u8');
-    assert.deepEqual(c.spec.input, { type: 'srt', passphrase: '********', audio: true });
+    assert.deepEqual(c.spec.input, { type: 'srt', passphrase: '********', latencyMs: 1000, audio: true });
 
     await assert.rejects(manager.create(spec({ id: 'd', input: { type: 'rtmp', streamKey: 'kd' } })), {
       message: 'no free rtmp ports in 1935-1936',
