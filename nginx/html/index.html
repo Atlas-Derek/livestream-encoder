@@ -40,6 +40,12 @@
     .small { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
     .small a { color: inherit; }
     select, button.plain { font: inherit; }
+    .seek { position: relative; height: 14px; margin-top: 10px; border-radius: 4px; background: var(--line); cursor: pointer; }
+    .seek[hidden] { display: none; }
+    .seek .played { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--muted); pointer-events: none; }
+    .seek .preview { position: absolute; bottom: 22px; transform: translateX(-50%); border: 1px solid var(--line); border-radius: 6px; background: var(--card); padding: 4px; pointer-events: none; }
+    .seek .preview .tile { background-repeat: no-repeat; border-radius: 3px; }
+    .seek .preview .time { font: 12px/1.4 ui-monospace, monospace; text-align: center; color: var(--fg); }
   </style>
 </head>
 <body>
@@ -49,6 +55,11 @@
       <p>Plays a channel's master playlist with hls.js, or the browser's own HLS player. Pick a channel on the right.</p>
       <div class="card" style="margin-top:14px">
         <video id="video" controls muted playsinline></video>
+        <!-- Seek thumbnails (thumbnails.vtt) for VOD channels created with "thumbnails": true. -->
+        <div class="seek" id="seek" hidden title="Hover for thumbnails, click to seek">
+          <div class="played" id="played"></div>
+          <div class="preview" id="preview" hidden><div class="tile" id="tile"></div><div class="time" id="preview-time"></div></div>
+        </div>
         <div class="meta">
           <span>Rendition: <select id="level"><option value="-1">Auto</option></select></span>
           <label><input type="checkbox" id="native"> Native HLS (Safari)</label>
@@ -95,6 +106,83 @@
     }
     document.getElementById('clear-log').addEventListener('click', () => logList.replaceChildren());
 
+    // Seek thumbnails: cues from the channel's thumbnails.vtt, each a time range and a tile of a sprite sheet
+    // (thumb_<id>_000.jpg#xywh=x,y,w,h).
+    const seek = document.getElementById('seek');
+    const preview = document.getElementById('preview');
+    const tile = document.getElementById('tile');
+    let cues = [];
+    let cuesUrl = null;
+
+    function vttTime(text) {
+      const [h, m, s] = text.split(':').map(Number);
+      return h * 3600 + m * 60 + s;
+    }
+
+    function parseThumbnails(text, base) {
+      const parsed = [];
+      const lines = text.split('\n').map((line) => line.trim());
+      lines.forEach((line, i) => {
+        const time = /^(\S+) --> (\S+)/.exec(line);
+        const ref = time && /^(.+)#xywh=(\d+),(\d+),(\d+),(\d+)$/.exec(lines[i + 1] || '');
+        if (!ref) return;
+        parsed.push({
+          start: vttTime(time[1]), end: vttTime(time[2]), url: new URL(ref[1], base).href,
+          x: Number(ref[2]), y: Number(ref[3]), w: Number(ref[4]), h: Number(ref[5]),
+        });
+      });
+      return parsed;
+    }
+
+    async function loadThumbnails(url) {
+      cuesUrl = url;
+      cues = [];
+      seek.hidden = true;
+      if (!url) return;
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const parsed = parseThumbnails(await res.text(), url);
+        if (cuesUrl !== url) return; // another channel was picked meanwhile
+        cues = parsed;
+        seek.hidden = cues.length === 0;
+        log(`seek thumbnails: ${cues.length} cue(s)`);
+      } catch (err) {
+        log(`seek thumbnails not loaded: ${err.message}`, 'warn');
+      }
+    }
+
+    /** The video's length: the player's, or where the last cue ends while it doesn't know yet. */
+    function seekDuration() {
+      return Number.isFinite(video.duration) && video.duration > 0 ? video.duration : (cues.length ? cues[cues.length - 1].end : 0);
+    }
+
+    function seekTime(event) {
+      const box = seek.getBoundingClientRect();
+      return Math.min(Math.max((event.clientX - box.left) / box.width, 0), 1) * seekDuration();
+    }
+
+    seek.addEventListener('mousemove', (event) => {
+      const t = seekTime(event);
+      const cue = cues.find((c) => t >= c.start && t < c.end) || cues[cues.length - 1];
+      if (!cue) return;
+      tile.style.width = `${cue.w}px`;
+      tile.style.height = `${cue.h}px`;
+      tile.style.backgroundImage = `url("${cue.url}")`;
+      tile.style.backgroundPosition = `-${cue.x}px -${cue.y}px`;
+      document.getElementById('preview-time').textContent = new Date(t * 1000).toISOString().slice(t >= 3600 ? 11 : 14, 19);
+      // Kept inside the bar, so the preview never hangs off the card's edge.
+      const half = cue.w / 2 + 5;
+      preview.style.left = `${Math.min(Math.max(event.clientX - seek.getBoundingClientRect().left, half), seek.clientWidth - half)}px`;
+      preview.hidden = false;
+    });
+    seek.addEventListener('mouseleave', () => { preview.hidden = true; });
+    seek.addEventListener('click', (event) => { video.currentTime = seekTime(event); });
+    video.addEventListener('timeupdate', () => {
+      const duration = seekDuration();
+      document.getElementById('played').style.width = duration ? `${(video.currentTime / duration) * 100}%` : '0';
+    });
+
     function levelName(level) {
       return level ? `${level.height}p · ${Math.round(level.bitrate / 1000)} kbps` : '–';
     }
@@ -114,6 +202,7 @@
       if (hls) hls.destroy();
       hls = null;
       lastCc = null;
+      loadThumbnails(channel.thumbnailsUrl || null);
       levelSelect.length = 1;
       video.removeAttribute('src');
       log(`loading ${channel.id} with ${nativeBox.checked ? 'native HLS' : 'hls.js'}`);
@@ -223,6 +312,9 @@
         lastChannels = await res.json();
         document.getElementById('api-status').textContent = lastChannels.length ? '' : 'No channels yet. Create one with POST /channels.';
         render(lastChannels);
+        // A VOD's thumbnails are made after its encode completes, so they can turn up while it is selected.
+        const current = selected && lastChannels.find((c) => c.id === selected.id);
+        if (current && (current.thumbnailsUrl || null) !== cuesUrl) loadThumbnails(current.thumbnailsUrl || null);
         // ?channel=<id> picks a channel on load, so a link can open straight into playback.
         const wanted = new URLSearchParams(location.search).get('channel');
         const match = selected === null && lastChannels.find((c) => c.id === wanted);

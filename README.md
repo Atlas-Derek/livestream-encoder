@@ -105,6 +105,8 @@ stream key is disconnected. Treat the key as a guard against mistakes, not as au
   - **Native HLS** plays through the browser's own player instead. Only Safari has one. hls.js runs in Safari too,
     so without this box native playback is never tested.
   - `?channel=<id>` opens a channel straight away: http://localhost:8080/?channel=obs.
+  - For a VOD channel with seek thumbnails, a timeline under the video shows the thumbnail and time under the
+    pointer; click to seek. The browser's own controls don't read thumbnail tracks.
 - **hls.js demo:** `https://hls-js.netlify.app/demo/?src=http://localhost:8080/hls/<id>/master.m3u8` (the test player
   links to it). nginx sends the CORS and private-network headers it needs. If Chrome still blocks the request,
   accept its local-network access prompt.
