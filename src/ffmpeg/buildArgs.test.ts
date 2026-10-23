@@ -5,6 +5,7 @@ import { AppError } from '../errors.ts';
 import {
   buildArgs,
   buildSlateArgs,
+  buildThumbnailArgs,
   colorPlan,
   inputArgs,
   publishedWindow,
@@ -455,6 +456,17 @@ describe('thumbnailSize', () => {
   });
 });
 
+describe('buildThumbnailArgs', () => {
+  it('lets the HLS demuxer fetch an encrypted recording\'s key, and numbers sheets from 0', () => {
+    const args = buildThumbnailArgs({ playlist: '/r/720p/index.m3u8', outDir: '/r', id: 'ab', size: { width: 160, height: 90 } });
+    // Without it ffmpeg refuses the key_<run>.key URI, so only encrypted recordings would lose their thumbnails.
+    assert.ok(args.indexOf('-allowed_extensions') < args.indexOf('-i'), 'an input option');
+    assert.equal(valueOf(args, '-allowed_extensions'), 'ALL');
+    assert.equal(valueOf(args, '-start_number'), '0');
+    assert.equal(args.at(-1), '/r/thumb_ab_%03d.jpg');
+  });
+});
+
 describe('buildSlateArgs', () => {
   const options: SlateOptions = { outDir: '/hls/ch', rungs: LADDER, hasAudio: true, segmentType: 'mpegts', encoder: ENCODER };
 
@@ -478,6 +490,9 @@ describe('buildSlateArgs', () => {
     assert.equal(valueOf(silent, '-var_stream_map'), 'v:0,name:1080p v:1,name:720p v:2,name:360p');
     const fmp4 = buildSlateArgs({ ...options, segmentType: 'fmp4' });
     assert.equal(valueOf(fmp4, '-hls_fmp4_init_filename'), `slate_${slateId({ ...options, segmentType: 'fmp4' })}_init_%v.mp4`);
+    // A source below every rung gets one rendition, and ffmpeg would leave a literal "%v" in the URL.
+    const single: SlateOptions = { ...options, segmentType: 'fmp4', rungs: LADDER.slice(2) };
+    assert.equal(valueOf(buildSlateArgs(single), '-hls_fmp4_init_filename'), `slate_${slateId(single)}_init.mp4`);
     assert.notEqual(slateId(options), slateId({ ...options, rungs: LADDER.slice(1) }));
     const elsewhere: SlateOptions = { ...options, outDir: '/elsewhere' };
     assert.equal(slateId(options), slateId(elsewhere), 'the same slate wherever it is written');
