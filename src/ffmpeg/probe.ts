@@ -1,4 +1,5 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -69,5 +70,33 @@ export function createProbe(ffprobePath: string, timeoutMs = 20_000): ProbeFn {
       const detail = isRecord(err) && typeof err.stderr === 'string' && err.stderr.trim() !== '' ? err.stderr.trim() : String(err);
       throw new Error(`ffprobe failed for ${input}: ${detail}`, { cause: err });
     }
+  };
+}
+
+/**
+ * ffprobe -show_streams -show_data of one output segment, for the codec configuration bytes (extradata) that
+ * src/hls/codecs.ts turns into a CODECS attribute. The init section is prepended for fMP4. The bytes go in on stdin, so
+ * no path quoting or temp file is needed.
+ */
+export function createSegmentStreamProbe(ffprobePath: string, timeoutMs = 10_000) {
+  return async (segment: string, init: string | null): Promise<unknown> => {
+    const data = Buffer.concat([...(init === null ? [] : [await readFile(init)]), await readFile(segment)]);
+    const child = spawn(ffprobePath, ['-v', 'error', '-show_streams', '-show_data', '-of', 'json', '-i', 'pipe:0'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+    });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => out.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => err.push(chunk));
+    // ffprobe may stop reading before the end of the segment; that is not an error.
+    child.stdin.on('error', () => {});
+    child.stdin.end(data);
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    if (code !== 0) throw new Error(`ffprobe failed for ${segment}: ${Buffer.concat(err).toString().trim() || `exit ${code}`}`);
+    return JSON.parse(Buffer.concat(out).toString());
   };
 }

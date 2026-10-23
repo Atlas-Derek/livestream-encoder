@@ -252,6 +252,43 @@ describe('buildArgs', () => {
     assert.equal(args.includes('-filter_complex'), false);
     assert.equal(valueOf(args, '-c'), 'copy');
     assert.equal(valueOf(args, '-var_stream_map'), 'v:0,a:0,name:source');
+    assert.equal(args.includes('-tag:v'), false);
+  });
+
+  it('packages HEVC passthrough as fMP4 with the hvc1 sample entry players require', () => {
+    const hevc = { ...PROBE_1080, videoCodec: 'hevc' };
+    const { args } = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod', passthrough: true, segmentType: 'fmp4' }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: hevc, encoder: ENCODER,
+    });
+    assert.equal(valueOf(args, '-tag:v'), 'hvc1');
+    assert.throws(
+      () =>
+        buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod', passthrough: true }), {
+          outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: hevc, encoder: ENCODER,
+        }),
+      (err) => err instanceof AppError && err.status === 422 && /segmentType.*fmp4/.test(err.message),
+    );
+  });
+
+  it('converts ADTS AAC for fMP4 passthrough and declares a bitrate for push passthrough', () => {
+    const push = buildArgs(spec({ type: 'srt' }, { passthrough: true, segmentType: 'fmp4' }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
+    });
+    assert.equal(valueOf(push.args, '-bsf:a'), 'aac_adtstoasc');
+    assert.equal(valueOf(push.args, '-b:v'), '5000k'); // the tallest rung
+    assert.equal(valueOf(push.args, '-b:a'), '128k');
+
+    const ts = buildArgs(spec({ type: 'srt', audio: false }, { passthrough: true }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER,
+    });
+    assert.equal(ts.args.includes('-bsf:a'), false); // MPEG-TS carries ADTS as is
+    assert.equal(ts.args.includes('-b:a'), false);
+
+    const mp3File = buildArgs(spec({ type: 'file', path: '/m/a.mp4' }, { mode: 'vod', passthrough: true, segmentType: 'fmp4' }), {
+      outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: null, probe: { ...PROBE_1080, audioCodec: 'mp3' }, encoder: ENCODER,
+    });
+    assert.equal(mp3File.args.includes('-bsf:a'), false);
+    assert.equal(mp3File.args.includes('-b:v'), false); // the container knows the bitrate
   });
 
   it('rejects passthrough for codecs HLS cannot carry', () => {

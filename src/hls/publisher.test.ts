@@ -64,6 +64,25 @@ describe('PlaylistPublisher', () => {
     assert.match(await read('720p', 'index.m3u8'), /00042/);
   });
 
+  it('adds missing CODECS once the variant has a segment, and stops probing after that', async () => {
+    await mkdir(path.join(outDir, '720p'), { recursive: true });
+    await writeFile(path.join(outDir, 'ffmpeg-master.m3u8'), MASTER);
+    let probes = 0;
+    const probeStreams = async (): Promise<unknown> => {
+      probes++;
+      return { streams: [{ codec_type: 'video', codec_name: 'h264', extradata: '00000000: 0164 0028  .d.(' }] };
+    };
+    const publisher = new PlaylistPublisher({ outDir, channel: 'ch', logger: silentLogger, probeStreams });
+
+    await publisher.sync(); // no variant playlist yet: published without CODECS, to be retried
+    assert.doesNotMatch(await read('master.m3u8'), /CODECS/);
+    await writeFfmpegOutput();
+    await publisher.sync();
+    assert.match(await read('master.m3u8'), /BANDWIDTH=1000,CODECS="avc1\.640028"\n720p\/index\.m3u8/);
+    await publisher.sync();
+    assert.equal(probes, 1);
+  });
+
   it('tolerates a missing output directory and logs other failures once', async () => {
     const errors: string[] = [];
     const logger: Logger = { ...silentLogger, error: (_obj, msg) => errors.push(msg ?? '') };

@@ -132,7 +132,7 @@ makes a single, longer one.
 | `1080i.mp4` | 1080i29.97: progressive output at 29.97 fps, no combing on moving edges |
 | `portrait.mp4` | 1080×1920, 720×1280, … |
 | `phone-rotated.mp4` | stored 1920×1080 with a rotate-90° flag, like most phone video: the same portrait output |
-| `hevc.mp4` | for `"passthrough": true`: H.265 copied into the segments |
+| `hevc.mp4` | for `"passthrough": true, "segmentType": "fmp4"`: H.265 copied into the segments, with `CODECS="hvc1.…"` in the master playlist |
 | `surround.mp4` | 5.1 audio, downmixed to stereo |
 | `audio-gap.ts` | audio missing from 5s to 8s: silence there, and the audio stays in sync afterwards |
 
@@ -394,6 +394,18 @@ Two other modes:
 - **Passthrough** (`-c copy`): no re-encoding. The source's own video and audio are repackaged as a single rendition
   named `source`. It costs almost no CPU, but there is no ABR, and segments break wherever the *source* put its
   keyframes. It needs H.264/HEVC video and AAC/MP3/AC-3 audio.
+  - **HEVC needs `"segmentType": "fmp4"`.** Safari and hls.js only play HEVC from fMP4, so a probed HEVC source with
+    MPEG-TS is refused. It is written with the `hvc1` sample entry Apple requires (`-tag:v hvc1`). ffmpeg would
+    otherwise write `hev1` when copying from MPEG-TS or a push source.
+  - **`CODECS`.** ffmpeg leaves the whole `CODECS` attribute out for HEVC from an MP4 source. The app then reads the
+    first segment and adds it, e.g. `hvc1.1.6.L120.90,mp4a.40.2`. Live master playlists get it when they are published,
+    VOD ones when the encode completes. Nothing is added when a codec isn't recognised.
+  - **fMP4 from MPEG-TS, SRT or RTMP** gets `-bsf:a aac_adtstoasc`. Their AAC is ADTS, which fMP4 can't carry, and
+    ffmpeg's HLS muxer doesn't add the filter itself.
+  - **Push sources** carry no bitrate when copied, so the top rung's bitrate is declared as the `BANDWIDTH` estimate.
+    Without it, ffmpeg advertised 79 kbps for a 2.6 Mbps stream.
+  - **HEVC from a push publisher** keeps `hev1`: its codec isn't known until it connects, and the tag can't be forced
+    without breaking H.264 publishers. hls.js in Chrome plays it; Safari won't.
 - **fMP4** (`segmentType: fmp4`): writes `.m4s` segments instead of MPEG-TS, plus an init section (the header every
   segment needs) per rendition and run: `init_<run>_<rung>.mp4`, or `init_<run>.mp4` for a single rendition.
 

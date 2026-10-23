@@ -255,6 +255,25 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
     assertPassthroughCompatible(probe);
     variants = [PASSTHROUGH_VARIANT];
     args.push('-map', '0:v:0', ...(hasAudio ? ['-map', '0:a:0'] : []), '-c', 'copy');
+    if (probe?.videoCodec === 'hevc') {
+      // Safari and hls.js only play HEVC from fMP4, and Apple requires the hvc1 sample entry. Copied from MPEG-TS
+      // or a push source, ffmpeg would write hev1.
+      if (spec.segmentType !== 'fmp4') {
+        throw new AppError('HEVC passthrough needs "segmentType": "fmp4"; players only play HEVC from fMP4', 422);
+      }
+      args.push('-tag:v', 'hvc1');
+    }
+    // AAC copied from MPEG-TS, SRT or RTMP is ADTS, which fMP4 can't carry; the HLS muxer doesn't add the filter
+    // itself. For AAC already in MP4 form it changes nothing. Push sources are assumed AAC, as OBS sends.
+    if (spec.segmentType === 'fmp4' && hasAudio && (probe === null || probe.audioCodec === 'aac')) {
+      args.push('-bsf:a', 'aac_adtstoasc');
+    }
+    if (probe === null) {
+      // A copied push stream carries no bitrate, so ffmpeg advertised BANDWIDTH=79310 for a 2.6 Mbps stream. Declare
+      // the top rung's as an estimate; with a single rendition, players don't choose by it.
+      const top = ladder.reduce((a, b) => (b.height > a.height ? b : a));
+      args.push('-b:v', `${top.videoBitrateKbps}k`, ...(hasAudio ? ['-b:a', `${top.audioBitrateKbps}k`] : []));
+    }
   } else {
     // Push sources can't be probed, so they are treated as landscape.
     const portrait = probe?.width != null && probe.height != null && probe.height > probe.width;

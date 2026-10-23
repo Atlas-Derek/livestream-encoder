@@ -47,6 +47,10 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
     per rendition, the full ladder froze for good (no error, out_time stuck) at the first audio gap of a real-time
     input, including every loop point of a looping file. Test audio changes with a looping live file.
   - The `fps` filter takes `source_fps` in its expression, which keeps the cap working for unprobed push sources.
+  - HEVC passthrough: ffmpeg writes no `CODECS` at all for HEVC from an MP4 (hvcC) source, so `fillMissingCodecs`
+    (src/hls/codecs.ts) adds it from the first segment. ffmpeg writes `hev1` unless given `-tag:v hvc1`, which Apple
+    requires. Copying AAC from MPEG-TS/SRT/RTMP into fMP4 fails without `-bsf:a aac_adtstoasc`. A copied push stream
+    has no bitrate, so `BANDWIDTH` is nonsense unless `-b:v`/`-b:a` are declared.
   - Audio stays muxed into each rendition. A shared audio group would save ~2% CPU (4 AAC encodes cost 1.4s per
     minute against 52s for the video ladder) at the cost of an extra playlist players must sync. Not worth it.
   - ffmpeg's live playlists are wrong after a restart: it never writes `EXT-X-DISCONTINUITY-SEQUENCE`, and with fMP4

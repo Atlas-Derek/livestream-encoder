@@ -1,6 +1,7 @@
 import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Logger } from '../log.ts';
+import { fillMissingCodecs, type ProbeSegmentStreams } from './codecs.ts';
 import {
   FFMPEG_MASTER_PLAYLIST,
   FFMPEG_MEDIA_PLAYLIST,
@@ -17,6 +18,8 @@ export interface PublisherOptions {
   channel: string;
   logger: Logger;
   intervalMs?: number;
+  /** Reads a segment's codec configuration, to add CODECS where ffmpeg left it out (HEVC). */
+  probeStreams?: ProbeSegmentStreams;
 }
 
 function isMissing(err: unknown): boolean {
@@ -105,7 +108,25 @@ export class PlaylistPublisher {
       const dir = path.join(outDir, entry.name);
       await this.#publish(path.join(dir, FFMPEG_MEDIA_PLAYLIST), path.join(dir, MEDIA_PLAYLIST), publishMediaPlaylist);
     }
-    await this.#publish(path.join(outDir, FFMPEG_MASTER_PLAYLIST), path.join(outDir, MASTER_PLAYLIST), publishMasterPlaylist);
+    await this.#publishMaster();
+  }
+
+  /** Like #publish, plus the CODECS ffmpeg left out; republished until every variant has a segment to read them from. */
+  async #publishMaster(): Promise<void> {
+    const { outDir, probeStreams } = this.#opts;
+    const from = path.join(outDir, FFMPEG_MASTER_PLAYLIST);
+    const source = await readIfExists(from);
+    if (source === null || this.#published.get(from) === source) return;
+    let text = publishMasterPlaylist(source);
+    let complete = true;
+    if (probeStreams !== undefined) {
+      const filled = await fillMissingCodecs(text, outDir, probeStreams);
+      for (const error of filled.errors) this.#opts.logger.warn({ channel: this.#opts.channel, error }, 'CODECS not added');
+      ({ text, complete } = filled);
+    }
+    const to = path.join(outDir, MASTER_PLAYLIST);
+    if ((await readIfExists(to)) !== text) await writeAtomic(to, text);
+    if (complete) this.#published.set(from, source);
   }
 
   async #publish(from: string, to: string, transform: (source: string, previous: string | null) => string): Promise<void> {
