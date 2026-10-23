@@ -10,7 +10,10 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
 - `npm run dev` — API on :3000 with `--watch`. `npm start` without watch.
 - `npm test` — `node --test` over `src/**/*.test.ts`. `npm run typecheck` — `tsc --noEmit`.
 - `npm run sample` — writes `media/sample.mp4` (1080p30 test pattern + tone). `npm run push:rtmp` / `npm run push:srt` —
-  push a live test pattern like OBS would.
+  push a live test pattern (with a burned-in wall clock) like OBS would.
+- `npm run test-media` — labelled clips in `media/test/`, one per encoder path (portrait, rotated, 1080i, 60 fps,
+  no audio, HEVC, 5.1, audio gap). `npm run check:hls -- <master URL or path>` — checks keyframe alignment,
+  discontinuities and playlist rules; exits 1 on a problem. Use both to verify encoder changes against real ffmpeg.
 
 ## Conventions
 

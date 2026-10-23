@@ -19,7 +19,7 @@ For a full walkthrough of the internals, see [How it works](#how-it-works).
 nvm use                         # Node 24 (.nvmrc)
 brew install ffmpeg-full nginx  # ffmpeg-full includes SRT; the plain ffmpeg formula does not
 npm install
-npm run sample                  # writes media/sample.mp4
+npm run sample                  # writes media/sample.mp4 (npm run test-media writes more, see Testing)
 ```
 
 Then run these in two terminals:
@@ -71,6 +71,7 @@ Channel options:
 | `mode` | `live` or `vod` | `live` |
 | `segmentType` | `mpegts` or `fmp4` | `mpegts` |
 | `passthrough` | `true` copies the streams without re-encoding (single rendition) | `false` |
+| `debugOverlay` | `true` prints each rendition's name in its picture, for watching ABR switches. Not with passthrough. | `false` |
 | `ladder` | per-channel list of rungs: `[{name, height, videoBitrateKbps, audioBitrateKbps, maxFps?}]`. `height` is the short side, so it is the width for portrait sources. | `config/ladder.json` |
 | `input.audio` (rtmp, srt) | `false` for a video-only encoder. Push sources can't be probed before a publisher connects, so this decides whether the renditions carry audio. A publisher that sends no audio to a channel expecting it is disconnected, and `lastError` says to set this. | `true` |
 
@@ -80,12 +81,95 @@ Each push channel gets its own port. RTMP ports run from 1935 to 1944 and SRT po
 with `RTMP_PORTS` / `SRT_PORTS`). The status output shows the exact ingest URL. A publisher with the wrong RTMP
 stream key is disconnected. Treat the key as a guard against mistakes, not as authentication.
 
-## Testing with the hls.js demo
+## Testing
 
-Open `https://hls-js.netlify.app/demo/?src=http://localhost:8080/hls/<id>/master.m3u8`, or use the test player at
-http://localhost:8080. nginx sends the CORS and private-network headers the demo needs. If Chrome still blocks the
-request, accept its local-network access prompt. Alternatively, run the demo locally:
-`git clone https://github.com/video-dev/hls.js && cd hls.js && npm install && npm run dev`.
+### Players
+
+- **Test player** (http://localhost:8080) lists the channels and plays one with hls.js.
+  - It shows the rendition and picture size, how much is buffered, how far behind the live edge playback is, the
+    bandwidth estimate, and dropped frames.
+  - The event log records rendition switches, discontinuities crossed, stalls and errors.
+  - **Native HLS** plays through the browser's own player instead. Only Safari has one. hls.js runs in Safari too,
+    so without this box native playback is never tested.
+  - `?channel=<id>` opens a channel straight away: http://localhost:8080/?channel=obs.
+- **hls.js demo:** `https://hls-js.netlify.app/demo/?src=http://localhost:8080/hls/<id>/master.m3u8` (the test player
+  links to it). nginx sends the CORS and private-network headers it needs. If Chrome still blocks the request,
+  accept its local-network access prompt.
+- **Other players** handle discontinuities and errors differently from hls.js, so they find different bugs:
+  - [Shaka Player demo](https://shaka-player-demo.appspot.com) (custom content), [Video.js](https://videojs.com/advanced/).
+  - `ffplay http://localhost:8080/hls/<id>/master.m3u8` (comes with ffmpeg-full), VLC, mpv.
+- **iPhone or iPad** on the same Wi-Fi: start the API with
+  `PUBLIC_HLS_BASE_URL=http://<your-mac>.local:8080/hls`, then open the playback URL in Safari. The API itself stays
+  local-only.
+- **Apple's validator:** `mediastreamvalidator` and `hlsreport`, from Apple's HTTP Live Streaming Tools
+  (developer.apple.com, free account), check a stream against the HLS spec and Apple's authoring rules.
+
+### Checking a stream
+
+```sh
+npm run check:hls -- http://localhost:8080/hls/<id>/master.m3u8   # or a path: var/hls/<id>/master.m3u8
+```
+
+It checks the invariants ABR playback depends on, and exits 1 on a problem, so it can run in scripts:
+- Segment *N* starts on a keyframe at the same timestamp in every rendition. It compares the newest 3 segments all
+  renditions share; pass a number to compare more.
+- Discontinuities line up across renditions.
+- No segment is longer than `EXT-X-TARGETDURATION`.
+- Live playlists carry `EXT-X-DISCONTINUITY-SEQUENCE`, and all renditions agree on it.
+
+### Test sources
+
+`npm run test-media` writes short labelled clips to `media/test/`, one per path through the encoder. Use any of them
+as a VOD (`"mode": "vod"`) or a looping live channel (`"loop": true`). `DURATION=60 npm run test-media -- 1080p60`
+makes a single, longer one.
+
+| Clip | What to expect |
+|---|---|
+| `720p30.mp4` | 720p and below; the 1080p rung is dropped |
+| `240p.mp4` | a single 240p rendition |
+| `no-audio.mp4` | no audio codec in the master playlist's `CODECS` |
+| `1080p60.mp4` | 60 fps on 1080p and 720p, 30 fps on 480p and 360p (`maxFps`) |
+| `1080i.mp4` | 1080i29.97: progressive output at 29.97 fps, no combing on moving edges |
+| `portrait.mp4` | 1080×1920, 720×1280, … |
+| `phone-rotated.mp4` | stored 1920×1080 with a rotate-90° flag, like most phone video: the same portrait output |
+| `hevc.mp4` | for `"passthrough": true`: H.265 copied into the segments |
+| `surround.mp4` | 5.1 audio, downmixed to stereo |
+| `audio-gap.ts` | audio missing from 5s to 8s: silence there, and the audio stays in sync afterwards |
+
+Live sources besides OBS:
+- **Test pattern push:** `npm run push:rtmp` and `npm run push:srt` burn in a wall clock. Hold a phone stopwatch, or
+  just the Mac's clock, next to the player to read end-to-end latency. Pass a file as the second argument to push it
+  instead of the test pattern.
+- **Rendition labels:** create a channel with `"debugOverlay": true` to print each rendition's name in its picture
+  (top right), so you can watch ABR switches happen.
+- **OBS over SRT:** Settings → Stream → Service: Custom, Server: `srt://localhost:9000?mode=caller` (add
+  `&passphrase=…&pbkeylen=16` for an encrypted channel).
+- **UDP MPEG-TS,** like a broadcast contribution feed:
+  ```sh
+  ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 \
+    -c:v libx264 -preset veryfast -tune zerolatency -g 60 -pix_fmt yuv420p -c:a aac \
+    -f mpegts 'udp://127.0.0.1:5000?pkt_size=1316'
+  # then: {"id":"udp","input":{"type":"pull","url":"udp://127.0.0.1:5000"}}
+  ```
+- **RTSP or RTMP pull without a camera:** `brew install mediamtx`, run `mediamtx`, push a test pattern into it
+  (`npm run push:rtmp -- rtmp://localhost:1935/test` after moving this app's RTMP ports with `RTMP_PORTS`), then
+  pull `rtsp://localhost:8554/test` or `rtmp://localhost:1935/test`.
+- **HLS pull:** pull another channel's output, e.g. `http://localhost:8080/hls/loop/master.m3u8`. A VOD playlist or
+  an HTTP file is read in real time (`-re` is added because ffprobe reports a duration).
+
+### Things to break
+
+| Do this | Expect |
+|---|---|
+| Stop the push (Ctrl+C) and start it again | `waiting_for_publisher`, then `running`; players continue after one discontinuity |
+| Push with the wrong RTMP stream key | `lastError: rejected publisher with wrong stream key` |
+| Push SRT without the channel's passphrase | the connection is refused; the channel keeps waiting |
+| Push video only to a channel without `"audio": false` | `lastError` says to set `"audio": false` |
+| `kill -STOP <pid of the pushing ffmpeg>` for 20s, then `kill -CONT` | `stalled: no output progress for 15s` and a restart |
+| `kill -9` the API, then start it again | the old ffmpeg is killed (`killed stale ffmpeg`) and channels come back |
+| Throttle the network in Chrome DevTools, or Safari/iOS with Network Link Conditioner | lower renditions in the event log, no stalls once it settles |
+| Create one more RTMP channel than `RTMP_PORTS` allows | `409 no free rtmp ports` |
+| Leave a looping channel running for hours | flat memory and `du -sh var/hls/<id>`, `restarts: 0` |
 
 ## Configuration (environment variables)
 
