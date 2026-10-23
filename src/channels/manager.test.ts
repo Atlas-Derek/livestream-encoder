@@ -38,7 +38,7 @@ function makeManager(overrides: Partial<ManagerDeps> = {}) {
   const probed: string[] = [];
   const probe: ProbeFn = async (input) => {
     probed.push(input);
-    const result: ProbeResult = { width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac' };
+    const result: ProbeResult = { width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', durationSec: null };
     return result;
   };
   const manager = new ChannelManager({

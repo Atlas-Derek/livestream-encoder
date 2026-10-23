@@ -22,11 +22,16 @@ describe('parseProbeOutput', () => {
         { codec_type: 'video', codec_name: 'h264', width: 1280, height: 720, avg_frame_rate: '0/0', r_frame_rate: '25/1' },
         { codec_type: 'audio', codec_name: 'aac' },
       ],
+      format: { format_name: 'mov,mp4,m4a,3gp,3g2,mj2', duration: '60.000000' },
     });
-    assert.deepEqual(result, { width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac' });
+    assert.deepEqual(result, { width: 1280, height: 720, fps: 25, videoCodec: 'h264', audioCodec: 'aac', durationSec: 60 });
+  });
+
+  it('reports no duration for a live source', () => {
+    assert.equal(parseProbeOutput({ streams: [], format: { format_name: 'hls' } }).durationSec, null);
   });
 
   it('tolerates missing streams', () => {
-    assert.deepEqual(parseProbeOutput({}), { width: null, height: null, fps: null, videoCodec: null, audioCodec: null });
+    assert.deepEqual(parseProbeOutput({}), { width: null, height: null, fps: null, videoCodec: null, audioCodec: null, durationSec: null });
   });
 });

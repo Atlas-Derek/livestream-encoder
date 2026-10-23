@@ -196,7 +196,7 @@ ffmpeg -hide_banner -nostdin -loglevel warning -nostats -progress pipe:1 -y
 |---|---|---|
 | file, live | `-re [-stream_loop -1] -i <path>` | `-re` reads at real-time speed, so a 60s file takes 60s, like a broadcast. `-stream_loop -1` repeats it forever. |
 | file, vod | `-i <path>` | No `-re`: encodes as fast as the CPU allows. |
-| pull | `-rw_timeout 10000000 -i <url>` (RTSP: `-rtsp_transport tcp -timeout …`) | ffmpeg connects out to the source. The timeout makes a dead source fail within 10s instead of hanging. |
+| pull | `[-re] -rw_timeout 10000000 -i <url>` (RTSP: `-rtsp_transport tcp -timeout …`) | ffmpeg connects out to the source. The timeout makes a dead source fail within 10s instead of hanging. `-re` is added when ffprobe reports a duration, meaning a finite source such as an HTTP file or a VOD playlist. Otherwise ffmpeg would read it hundreds of times faster than real time and race through the live window. |
 | rtmp | `-listen 1 -i rtmp://0.0.0.0:<port>/live/<key>` | ffmpeg *becomes* an RTMP server and waits until a publisher such as OBS connects. |
 | srt | `-i srt://0.0.0.0:<port>?mode=listener[&passphrase=…&pbkeylen=16]` | ffmpeg waits for an SRT caller. With a passphrase, the stream is AES-encrypted and callers without the passphrase are refused. |
 

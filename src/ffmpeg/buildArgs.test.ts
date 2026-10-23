@@ -13,7 +13,7 @@ const LADDER: Rung[] = [
 
 const ENCODER: EncoderConfig = { videoEncoder: 'libx264', x264Preset: 'veryfast', segmentSeconds: 4, liveListSize: 6 };
 
-const PROBE_1080: ProbeResult = { width: 1920, height: 1080, fps: 30, videoCodec: 'h264', audioCodec: 'aac' };
+const PROBE_1080: ProbeResult = { width: 1920, height: 1080, fps: 30, videoCodec: 'h264', audioCodec: 'aac', durationSec: null };
 
 function spec(input: unknown, extra: Record<string, unknown> = {}) {
   return ChannelSpecSchema.parse({ id: 'ch', input, ...extra });
@@ -60,6 +60,13 @@ describe('inputArgs', () => {
     assert.deepEqual(inputArgs({ type: 'pull', url: 'https://x/live.m3u8' }, 'live', null), [
       '-rw_timeout', '10000000', '-i', 'https://x/live.m3u8',
     ]);
+  });
+
+  it('paces a pull whose source has a duration (an HTTP file or VOD playlist)', () => {
+    assert.deepEqual(inputArgs({ type: 'pull', url: 'https://x/vod.m3u8' }, 'live', null, { ...PROBE_1080, durationSec: 60 }), [
+      '-re', '-rw_timeout', '10000000', '-i', 'https://x/vod.m3u8',
+    ]);
+    assert.equal(inputArgs({ type: 'pull', url: 'https://x/live.m3u8' }, 'live', null, PROBE_1080).includes('-re'), false);
   });
 
   it('listens for RTMP on the assigned port and key', () => {

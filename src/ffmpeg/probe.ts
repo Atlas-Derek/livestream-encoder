@@ -9,6 +9,8 @@ export interface ProbeResult {
   fps: number | null;
   videoCodec: string | null;
   audioCodec: string | null;
+  /** Set for finite sources (files, VOD playlists); null for live ones, which ffprobe reports without a duration. */
+  durationSec: number | null;
 }
 
 export type ProbeFn = (input: string) => Promise<ProbeResult>;
@@ -34,18 +36,20 @@ export function parseProbeOutput(json: unknown): ProbeResult {
   const streams = isRecord(json) && Array.isArray(json.streams) ? json.streams.filter(isRecord) : [];
   const video = streams.find((s) => s.codec_type === 'video');
   const audio = streams.find((s) => s.codec_type === 'audio');
+  const format = isRecord(json) && isRecord(json.format) ? json.format : null;
   return {
     width: positiveNumber(video?.width),
     height: positiveNumber(video?.height),
     fps: parseFrameRate(video?.avg_frame_rate) ?? parseFrameRate(video?.r_frame_rate),
     videoCodec: typeof video?.codec_name === 'string' ? video.codec_name : null,
     audioCodec: typeof audio?.codec_name === 'string' ? audio.codec_name : null,
+    durationSec: positiveNumber(typeof format?.duration === 'string' ? Number(format.duration) : format?.duration),
   };
 }
 
 export function createProbe(ffprobePath: string, timeoutMs = 20_000): ProbeFn {
   return async (input) => {
-    const args = ['-v', 'error', '-print_format', 'json', '-show_streams'];
+    const args = ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format'];
     if (input.startsWith('rtsp')) args.push('-rtsp_transport', 'tcp');
     args.push(input);
     try {

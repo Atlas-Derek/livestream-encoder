@@ -72,15 +72,24 @@ function requirePort(port: number | null, input: Input): number {
   return port;
 }
 
-export function inputArgs(input: Input, mode: ChannelSpec['mode'], port: number | null): string[] {
+export function inputArgs(
+  input: Input,
+  mode: ChannelSpec['mode'],
+  port: number | null,
+  probe: ProbeResult | null = null,
+): string[] {
   switch (input.type) {
     case 'file':
       return [...(mode === 'live' ? ['-re'] : []), ...(input.loop ? ['-stream_loop', '-1'] : []), '-i', input.path];
-    case 'pull':
+    case 'pull': {
+      // A finite source (an HTTP file, a VOD playlist) would otherwise be read as fast as the CPU allows and race
+      // through the live window. Live sources pace themselves, and -re on them only adds latency.
+      const pace = probe?.durationSec != null ? ['-re'] : [];
       // The RTSP demuxer has its own socket timeout; every other protocol honours rw_timeout (microseconds).
       return input.url.startsWith('rtsp')
-        ? ['-rtsp_transport', 'tcp', '-timeout', '10000000', '-i', input.url]
-        : ['-rw_timeout', '10000000', '-i', input.url];
+        ? [...pace, '-rtsp_transport', 'tcp', '-timeout', '10000000', '-i', input.url]
+        : [...pace, '-rw_timeout', '10000000', '-i', input.url];
+    }
     case 'rtmp':
       return ['-listen', '1', '-i', `rtmp://0.0.0.0:${requirePort(port, input)}/live/${input.streamKey}`];
     case 'srt': {
@@ -173,7 +182,7 @@ export function buildArgs(spec: ChannelSpec, options: BuildOptions): BuildResult
   const hasAudio = probe === null || probe.audioCodec !== null;
 
   const args = ['-hide_banner', '-nostdin', '-loglevel', 'warning', '-nostats', '-progress', 'pipe:1', '-y'];
-  args.push(...inputArgs(spec.input, spec.mode, port));
+  args.push(...inputArgs(spec.input, spec.mode, port, probe));
 
   let variants: string[];
   if (spec.passthrough) {
