@@ -14,6 +14,7 @@ import {
   rungVideoKbps,
   selectRungs,
   slateId,
+  thumbnailSize,
   type EncoderConfig,
   type SlateOptions,
 } from './buildArgs.ts';
@@ -443,6 +444,14 @@ describe('encryption', () => {
     const options = { outDir: '/hls/ch', runId: 'r1', ladder: LADDER, port: 9000, probe: null, encoder: ENCODER };
     assert.equal(valueOf(buildArgs(spec({ type: 'srt' }), { ...options, keyInfoFile: '/var/keys/ch.keyinfo' }).args, '-hls_key_info_file'), '/var/keys/ch.keyinfo');
     assert.equal(buildArgs(spec({ type: 'srt' }), options).args.includes('-hls_key_info_file'), false);
+  });
+});
+
+describe('thumbnailSize', () => {
+  it('is 160 wide with an even height that keeps the rendition\'s shape', () => {
+    assert.deepEqual(thumbnailSize(426, 240), { width: 160, height: 90 });
+    assert.deepEqual(thumbnailSize(1080, 1920), { width: 160, height: 284 });
+    assert.deepEqual(thumbnailSize(640, 480), { width: 160, height: 120 });
   });
 });
 

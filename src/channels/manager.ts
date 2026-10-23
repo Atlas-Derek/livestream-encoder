@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -37,6 +38,7 @@ import {
   RECORDINGS_DIR,
   type RecordingSummary,
 } from '../hls/recorder.ts';
+import { generateThumbnails, THUMBNAILS_VTT } from '../hls/thumbnails.ts';
 import type { Logger } from '../log.ts';
 import type { WebhookEvent } from '../notify/webhooks.ts';
 import {
@@ -64,6 +66,8 @@ export interface ChannelStatus extends SupervisorStatus {
   id: string;
   /** The recording being written, for channels with record: true. */
   recording: string | null;
+  /** VOD channels with thumbnails: true, once made: WebVTT seek thumbnails. */
+  thumbnailsUrl: string | null;
   spec: ChannelSpec;
   port: number | null;
   desired: ChannelRecord['desired'];
@@ -84,6 +88,8 @@ export interface ManagerDeps {
   killStale?: (pidDir: string) => Promise<unknown>;
   /** Runs ffmpeg once with the slate's arguments (buildSlateArgs). */
   renderSlate?: (args: string[]) => Promise<unknown>;
+  /** Runs ffmpeg once with seek thumbnails' arguments (buildThumbnailArgs). */
+  renderThumbnails?: (args: string[]) => Promise<unknown>;
   /** Channel state changes and closed recordings, for webhooks. */
   notify?: (event: WebhookEvent) => void;
 }
@@ -97,10 +103,14 @@ interface Entry {
   publishError: string | null;
   /** Live channels with record: true. */
   recorder: Recorder | null;
+  /** Why the last seek thumbnails couldn't be made; cleared when some are. */
+  thumbnailError: string | null;
 }
 
 export interface RecordingStatus extends RecordingSummary {
   playbackUrl: string;
+  /** WebVTT seek thumbnails, once made (channels with thumbnails: true). */
+  thumbnailsUrl: string | null;
 }
 
 /** States in which ffmpeg may be writing playlists, so the publisher keeps polling. */
@@ -157,8 +167,8 @@ export class ChannelManager {
   readonly #deps: ManagerDeps;
   readonly #probe: ProbeFn;
   readonly #probeStreams: ProbeSegmentStreams;
-  /** Finishing touches to completed VOD masters, so shutdown() can wait for them. */
-  readonly #masterFinishes = new Set<Promise<void>>();
+  /** Finishing touches to completed VOD output and recordings, so shutdown() can wait for them. */
+  readonly #finishing = new Set<Promise<void>>();
   readonly #entries = new Map<string, Entry>();
   #writing: Promise<void> = Promise.resolve();
   readonly #pidWrites = new Set<Promise<void>>();
@@ -246,7 +256,12 @@ export class ChannelManager {
   async listRecordings(id: string): Promise<RecordingStatus[]> {
     this.#entry(id);
     const base = `${this.#channelUrl(id)}/${RECORDINGS_DIR}`;
-    return (await listRecordings(this.#outDir(id))).map((r) => ({ ...r, playbackUrl: `${base}/${r.id}/master.m3u8` }));
+    const recordings = await listRecordings(this.#outDir(id));
+    return recordings.map((r) => ({
+      ...r,
+      playbackUrl: `${base}/${r.id}/${MASTER_PLAYLIST}`,
+      thumbnailsUrl: existsSync(path.join(this.#outDir(id), RECORDINGS_DIR, r.id, THUMBNAILS_VTT)) ? `${base}/${r.id}/${THUMBNAILS_VTT}` : null,
+    }));
   }
 
   /** A playback URL valid for ttlSeconds (rounded up to the hour), signed when PLAYBACK_SECRET is set. */
@@ -278,7 +293,7 @@ export class ChannelManager {
   /** Stops every ffmpeg so playlists are finalized, without changing what should autostart next boot. */
   async shutdown(): Promise<void> {
     await Promise.all([...this.#entries.values()].map((entry) => this.#halt(entry)));
-    await Promise.all([this.#writing, ...this.#pidWrites, ...this.#masterFinishes]);
+    await Promise.all([this.#writing, ...this.#pidWrites, ...this.#finishing]);
   }
 
   /** Stops ffmpeg, then publishes whatever it wrote while finalizing. */
@@ -323,10 +338,15 @@ export class ChannelManager {
             channel: spec.id,
             logger: this.#deps.logger,
             onClose: ({ id, durationSec }) =>
-              this.#deps.notify?.({
-                event: 'recording.closed', channel: spec.id, recording: id, durationSec,
-                playbackUrl: `${this.#channelUrl(spec.id)}/${RECORDINGS_DIR}/${id}/${MASTER_PLAYLIST}`,
-              }),
+              this.#track(
+                (async () => {
+                  if (spec.thumbnails) await this.#makeThumbnails(spec.id, path.join(this.#outDir(spec.id), RECORDINGS_DIR, id));
+                  this.#deps.notify?.({
+                    event: 'recording.closed', channel: spec.id, recording: id, durationSec,
+                    playbackUrl: `${this.#channelUrl(spec.id)}/${RECORDINGS_DIR}/${id}/${MASTER_PLAYLIST}`,
+                  });
+                })(),
+              ),
           })
         : null;
     const publisher =
@@ -342,7 +362,8 @@ export class ChannelManager {
             ...(recorder === null ? {} : { recorder }),
           })
         : null;
-    return { record, publisher, recorder, supervisor: this.#makeSupervisor(record, publisher), publishError: null };
+    const supervisor = this.#makeSupervisor(record, publisher);
+    return { record, publisher, recorder, supervisor, publishError: null, thumbnailError: null };
   }
 
   #makeSupervisor(record: ChannelRecord, publisher: PlaylistPublisher | null): Supervisor {
@@ -386,14 +407,30 @@ export class ChannelManager {
     record.completedAt = new Date().toISOString();
     record.desired = 'stopped';
     void this.#persistLogged();
-    if (record.spec.mode === 'vod') {
-      const finish = this.#finishVod(record.spec.id);
-      this.#masterFinishes.add(finish);
-      void (async () => {
-        await finish;
-        this.#masterFinishes.delete(finish);
-      })();
+    if (record.spec.mode === 'vod') this.#track(this.#finishVod(record.spec.id));
+  }
+
+  /** Runs a finishing task in the background; shutdown() waits for it. It must not reject. */
+  #track(task: Promise<void>): void {
+    this.#finishing.add(task);
+    void (async () => {
+      await task;
+      this.#finishing.delete(task);
+    })();
+  }
+
+  /** Seek thumbnails for finished output in dir; a failure goes into the channel's warnings. */
+  async #makeThumbnails(id: string, dir: string): Promise<void> {
+    const run = this.#deps.renderThumbnails ?? ((args: string[]) => execFileAsync(this.#deps.config.ffmpegPath, args, { timeout: 600_000 }));
+    let error: string | null = null;
+    try {
+      await generateThumbnails(dir, run);
+    } catch (err) {
+      error = `no seek thumbnails: ${err instanceof Error ? err.message : String(err)}`;
+      this.#deps.logger.error({ channel: id, err }, 'failed to make seek thumbnails');
     }
+    const entry = this.#entries.get(id);
+    if (entry !== undefined) entry.thumbnailError = error;
   }
 
   /**
@@ -413,6 +450,8 @@ export class ChannelManager {
     } catch (err) {
       logger.error({ channel: id, err }, 'failed to finish the master playlist');
     }
+    // Into the staging directory, so a rebuild's thumbnails arrive together with it.
+    if (this.#entries.get(id)?.record.spec.thumbnails) await this.#makeThumbnails(id, staging);
     try {
       await publishVodOutput(staging, this.#outDir(id));
     } catch (err) {
@@ -541,6 +580,10 @@ export class ChannelManager {
       ingestUrl,
       playbackUrl: `${this.#channelUrl(spec.id)}/${MASTER_PLAYLIST}`,
       recording: recorder?.current ?? null,
+      thumbnailsUrl:
+        spec.mode === 'vod' && spec.thumbnails && existsSync(path.join(this.#outDir(spec.id), THUMBNAILS_VTT))
+          ? `${this.#channelUrl(spec.id)}/${THUMBNAILS_VTT}`
+          : null,
       ...status,
       // The publisher remembers the last run's segments, which only matter while it runs.
       warnings: [
@@ -549,6 +592,7 @@ export class ChannelManager {
         ...(entry.publishError === null ? [] : [entry.publishError]),
         ...(slateError === undefined ? [] : [slateError]),
         ...(recorder?.error ? [recorder.error] : []),
+        ...(entry.thumbnailError === null ? [] : [entry.thumbnailError]),
         ...(spec.encrypt && this.#deps.config.playbackSecret === null
           ? ['segments are encrypted, but anyone who can load the playlist can fetch the key: set PLAYBACK_SECRET']
           : []),

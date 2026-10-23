@@ -80,6 +80,7 @@ Channel options:
 | `segmentType` | `mpegts` or `fmp4` | `mpegts` |
 | `passthrough` | `true` copies the streams without re-encoding (single rendition) | `false` |
 | `encrypt` | AES-128 segments, with a new key per ffmpeg run, served beside the master playlist. Use it with `PLAYBACK_SECRET`: otherwise anyone who can load the playlist can fetch the key (`warnings` says so). MPEG-TS only: ffmpeg can't encrypt fMP4. | `false` |
+| `thumbnails` | WebVTT seek thumbnails for VOD output and recordings (see [Seek thumbnails](#seek-thumbnails)). Not for a live window. | `false` |
 | `record` | Live only: keep everything the source sends as VOD recordings (see [Recording](#recording)). | `false` |
 | `dvrWindowSeconds` | Live only: how far back players can seek, up to 6 hours. The published playlist lists that many seconds of segments (at least `LIVE_LIST_SIZE`), and their files are kept for as long. Every playlist refresh then carries the whole window, so keep it to what viewers need. | none |
 | `debugOverlay` | `true` prints each rendition's name in its picture, for watching ABR switches. Not with passthrough. | `false` |
@@ -211,6 +212,20 @@ Live sources besides OBS:
 | `PLAYBACK_TOKEN_TTL_SECONDS` | `21600`. How long the signed `playbackUrl` in a channel's status stays valid |
 | `WEBHOOK_URLS` | none. Comma-separated http(s) URLs that get a JSON POST for each channel state change and each closed recording (see [Webhooks](#webhooks)) |
 | `WEBHOOK_SECRET` | none. When set, each webhook carries `X-LSE-Signature: sha256=<HMAC-SHA256 of the body>` |
+
+### Seek thumbnails
+
+With `"thumbnails": true`, a finished VOD encode and each closed recording get seek-bar previews: sprite sheets
+(`thumb_<id>_000.jpg`, 10 × 10 thumbnails 160 px wide, one per 2 s) and a `thumbnails.vtt` whose cues point into them
+(`thumb_<id>_000.jpg#xywh=160,90,160,90`). video.js, Shaka, JW Player and most hls.js players take that track. Its
+URL is `thumbnailsUrl` in the channel's status (VOD) or in `GET /channels/:id/recordings`.
+- One ffmpeg pass over the smallest rendition, decrypting if the channel is encrypted. Frames are numbered at the
+  stream's frame rate, so thumbnails follow the playlist's timeline across a recording's discontinuities. Each is the
+  frame from the middle of its 2 s.
+- A VOD's thumbnails are made before its output is swapped in, so a rebuilt VOD never shows the previous one's.
+  Sheet names change on every render, since they are cached for a day; `thumbnails.vtt` is `no-cache`.
+- A live window has none: where a cue falls on a sliding window's timeline depends on the player.
+- If rendering fails, `warnings` says why.
 
 ### Signed playback URLs
 

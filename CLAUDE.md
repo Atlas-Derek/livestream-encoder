@@ -110,6 +110,8 @@ HLS under `var/hls/<channel>/`, which nginx serves on :8080. Everything runs nat
 
 - `var/` (gitignored): `hls/` output, `channels.json` (persisted channels), `pids/` (ffmpeg pid files, used to kill
   orphans after a crash), `nginx/` logs and temp dirs. `media/` (gitignored) holds input files.
+- Seek thumbnails (`src/hls/thumbnails.ts`): `thumbnails.vtt` and `thumb_<id>_<n>.jpg` sheets beside a finished
+  VOD's or recording's master playlist, rendered from the smallest rendition with `buildThumbnailArgs`.
 - `var/hls/<channel>/recordings/<id>/` (`src/hls/recorder.ts`): hard links to the segments a recording channel
   published, plus EVENT/VOD playlists. The live sweep leaves this directory alone, and `recordings` is not a valid
   rung name.

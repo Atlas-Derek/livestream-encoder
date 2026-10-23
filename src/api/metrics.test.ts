@@ -6,7 +6,7 @@ import { formatMetrics } from './metrics.ts';
 
 function channel(id: string, extra: Partial<ChannelStatus> = {}): ChannelStatus {
   return {
-    id, recording: null, spec: ChannelSpecSchema.parse({ id, input: { type: 'srt' } }), port: 9000, desired: 'running',
+    id, recording: null, thumbnailsUrl: null, spec: ChannelSpecSchema.parse({ id, input: { type: 'srt' } }), port: 9000, desired: 'running',
     completedAt: null, ingestUrl: null, playbackUrl: '', state: 'running', pid: 1, runningSince: null, uptimeSec: 120,
     restarts: 2, lastError: null, lastErrorAt: null, realtimeFactor: 0.998, warnings: [], stderrTail: [],
     progress: { frame: 1, fps: 30, bitrateKbps: 10450.2, speed: 1, outTimeSec: 120 },

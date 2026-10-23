@@ -75,7 +75,7 @@ describe('routes', () => {
     const list = await app.inject({ method: 'GET', url: '/channels/rec/recordings' });
     assert.deepEqual(list.json(), [{
       id: '20261023T160000Z', startedAt: '2026-10-23T16:00:00.000Z', durationSec: 4, open: false, variants: ['720p'],
-      playbackUrl: 'http://localhost:8080/hls/rec/recordings/20261023T160000Z/master.m3u8',
+      playbackUrl: 'http://localhost:8080/hls/rec/recordings/20261023T160000Z/master.m3u8', thumbnailsUrl: null,
     }]);
     assert.equal((await app.inject({ method: 'DELETE', url: '/channels/rec/recordings/..%2F720p' })).statusCode, 404);
     assert.equal((await app.inject({ method: 'DELETE', url: '/channels/rec/recordings/20261023T160000Z' })).statusCode, 204);

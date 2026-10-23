@@ -414,6 +414,33 @@ describe('ChannelManager', () => {
     assert.equal(existsSync(infoFile), false);
   });
 
+  it('makes a VOD\'s seek thumbnails before swapping it in, and reports them', async () => {
+    const file = await sampleFile();
+    const rendered: string[] = [];
+    const { manager, spawner } = makeManager({
+      renderThumbnails: async (args) => {
+        rendered.push(args[args.indexOf('-i') + 1] ?? '');
+        await writeFile((args.at(-1) ?? '').replace('%03d', '000'), 'jpeg');
+      },
+    });
+    await manager.init();
+    await manager.create(spec({ id: 'vod', input: { type: 'file', path: file }, mode: 'vod', thumbnails: true }));
+    await waitFor(() => spawner.calls.length === 1);
+    const staging = path.join(config.hlsRoot, '.building-vod');
+    await writeFile(path.join(staging, 'master.m3u8'), '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1280x720\n720p/index.m3u8\n');
+    await writeFile(path.join(staging, '720p', 'index.m3u8'), '#EXTM3U\n#EXTINF:4.0,\nseg_r1_00000.ts\n#EXT-X-ENDLIST\n');
+    assert.equal(manager.get('vod').thumbnailsUrl, null);
+    spawner.last().progress(4);
+    await waitFor(() => manager.get('vod').state === 'running');
+    spawner.last().exit(0);
+    await waitFor(() => manager.get('vod').thumbnailsUrl !== null);
+
+    assert.deepEqual(rendered, [path.join(staging, '720p', 'index.m3u8')], 'rendered in staging, before the swap');
+    assert.equal(manager.get('vod').thumbnailsUrl, 'http://localhost:8080/hls/vod/thumbnails.vtt');
+    assert.match(await readFile(path.join(config.hlsRoot, 'vod', 'thumbnails.vtt'), 'utf8'), /^WEBVTT/);
+    assert.deepEqual(manager.get('vod').warnings, []);
+  });
+
   it('kills stale ffmpeg on boot and keeps a pid file for each running ffmpeg', async () => {
     const swept: string[] = [];
     const { manager, spawner } = makeManager({

@@ -475,3 +475,35 @@ export function buildSlateArgs(options: SlateOptions): string[] {
   );
   return args;
 }
+
+/** One seek thumbnail per this many seconds of video. */
+export const THUMBNAIL_INTERVAL_SECONDS = 2;
+const THUMBNAIL_WIDTH = 160;
+/** Thumbnails per sprite sheet: 10 x 10, so a sheet covers 200s and stays around 100 KB. */
+export const THUMBNAIL_GRID = 10;
+
+/** A thumbnail's size for a rendition of width x height: 160 wide, the height to match, even. */
+export function thumbnailSize(width: number, height: number): { width: number; height: number } {
+  return { width: THUMBNAIL_WIDTH, height: 2 * Math.max(1, Math.round((THUMBNAIL_WIDTH * height) / width / 2)) };
+}
+
+/**
+ * Pure: renders seek thumbnails from a finished rendition's playlist into sprite sheets thumb_<id>_<n>.jpg. setpts
+ * numbers frames from 0 at the stream's frame rate, so the thumbnails follow the playlist's timeline even across the
+ * discontinuities of a recording; fps then takes the frame from the middle of each interval. allowed_extensions lets
+ * the HLS demuxer fetch an AES key (key_<run>.key).
+ */
+export function buildThumbnailArgs(options: {
+  playlist: string;
+  outDir: string;
+  id: string;
+  size: { width: number; height: number };
+}): string[] {
+  const { playlist, outDir, id, size } = options;
+  return [
+    '-hide_banner', '-nostdin', '-loglevel', 'error', '-y', '-allowed_extensions', 'ALL', '-i', playlist, '-an',
+    '-vf', `setpts=N/(FRAME_RATE*TB),fps=1/${THUMBNAIL_INTERVAL_SECONDS},scale=${size.width}:${size.height},` +
+      `tile=${THUMBNAIL_GRID}x${THUMBNAIL_GRID}`,
+    '-q:v', '5', '-start_number', '0', path.join(outDir, `thumb_${id}_%03d.jpg`),
+  ];
+}
